@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model checkpoints & cache
+models/
+*.bin
+*.safetensors
+*.gguf
+.cache/
+huggingface_cache/
+
+# Data files (large)
+shroom-visions-data/
+shroom-visions-data.zip
+*.zip
+
+# Outputs (regeneratable)
+outputs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

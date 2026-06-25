@@ -1,0 +1,715 @@
+#!/usr/bin/env python3
+"""
+SHROOM-Visions Hallucination Detection Evaluation
+===================================================
+Single-script evaluation pipeline using Qwen3-VL-2B-Thinking model.
+
+Evaluates hallucination span detection on a held-out 10% of the English
+training data, computes IoU (span identification) and Pearson correlation
+(confidence calibration), and outputs:
+  - CSV file with per-sample predictions
+  - JSON file with aggregated metric results
+
+Usage:
+    python evaluate.py                          # Run full evaluation
+    python evaluate.py --max_samples 10         # Quick test with 10 samples
+    python evaluate.py --resume                 # Resume from checkpoint
+"""
+
+import argparse
+import csv
+import json
+import logging
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+from scipy.stats import pearsonr
+from tabulate import tabulate
+from tqdm import tqdm
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-2B-Thinking"
+DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
+OUTPUT_DIR = Path(__file__).parent / "outputs"
+TRAIN_FILE = DATA_DIR / "shroom-vision.train.en.labeled.jsonl"
+EVAL_SPLIT_RATIO = 0.10  # Use 10% of training data for evaluation
+RANDOM_SEED = 42
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Metrics: IoU (Span Identification) & Calibration (Pearson Correlation)
+# ============================================================================
+
+def labels_to_char_binary(labels: list[dict], response_length: int) -> np.ndarray:
+    """Convert span labels to a binary character-level array.
+
+    Each position is 1 if ANY label spans that character, else 0.
+    """
+    arr = np.zeros(response_length, dtype=np.float64)
+    for label in labels:
+        start = max(0, label["start"])
+        end = min(response_length, label["end"])
+        arr[start:end] = 1.0
+    return arr
+
+
+def labels_to_char_probs(labels: list[dict], response_length: int) -> np.ndarray:
+    """Convert span labels to a character-level probability array.
+
+    For overlapping spans, takes the maximum probability at each position.
+    The `prob` field represents the empirical annotator agreement probability.
+    """
+    arr = np.zeros(response_length, dtype=np.float64)
+    for label in labels:
+        start = max(0, label["start"])
+        end = min(response_length, label["end"])
+        prob = label.get("prob", 1.0)
+        arr[start:end] = np.maximum(arr[start:end], prob)
+    return arr
+
+
+def compute_iou(gold_labels: list[dict], pred_labels: list[dict],
+                response_length: int) -> float:
+    """Compute character-level Intersection-over-Union (IoU).
+
+    If both gold and pred are empty, IoU = 1.0 (perfect agreement on
+    "no hallucination").
+    """
+    gold_arr = labels_to_char_binary(gold_labels, response_length)
+    pred_arr = labels_to_char_binary(pred_labels, response_length)
+
+    intersection = np.sum(gold_arr * pred_arr)
+    union = np.sum(np.maximum(gold_arr, pred_arr))
+
+    if union == 0:
+        return 1.0  # Both are empty → perfect agreement
+    return float(intersection / union)
+
+
+def compute_calibration(gold_labels: list[dict], pred_labels: list[dict],
+                        response_length: int) -> float | None:
+    """Compute Pearson correlation between gold and predicted char-level probs.
+
+    Returns None if correlation cannot be computed (e.g., zero variance).
+    """
+    gold_probs = labels_to_char_probs(gold_labels, response_length)
+    pred_probs = labels_to_char_probs(pred_labels, response_length)
+
+    # Pearson requires variance in both arrays
+    if np.std(gold_probs) == 0 and np.std(pred_probs) == 0:
+        return 1.0  # Both constant → perfect calibration
+    if np.std(gold_probs) == 0 or np.std(pred_probs) == 0:
+        return 0.0  # One constant, one not → zero correlation
+
+    corr, _ = pearsonr(gold_probs, pred_probs)
+    return float(corr) if not np.isnan(corr) else 0.0
+
+
+# ============================================================================
+# Data Loading & Splitting
+# ============================================================================
+
+def load_data(filepath: Path) -> list[dict]:
+    """Load JSONL data file."""
+    samples = []
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                samples.append(json.loads(line))
+    logger.info(f"Loaded {len(samples)} samples from {filepath.name}")
+    return samples
+
+
+def split_eval_data(samples: list[dict], ratio: float = 0.10,
+                    seed: int = 42) -> list[dict]:
+    """Extract a random 10% subset for evaluation."""
+    rng = np.random.RandomState(seed)
+    n_eval = max(1, int(len(samples) * ratio))
+    indices = rng.choice(len(samples), size=n_eval, replace=False)
+    eval_samples = [samples[i] for i in sorted(indices)]
+    logger.info(
+        f"Split: {n_eval} eval samples ({ratio*100:.0f}%) from "
+        f"{len(samples)} total"
+    )
+    return eval_samples
+
+
+# ============================================================================
+# Prompt Construction & Output Parsing
+# ============================================================================
+
+SYSTEM_PROMPT = """You are an expert hallucination detector for vision-language model outputs.
+
+Your task: Given a user's question about an image and the model's response, identify all hallucinated spans in the response.
+
+A hallucination is any part of the response that is:
+- **Invention**: Information fabricated without any basis (e.g., making up a species name, location, or fact).
+- **Mischaracterization**: Describing something that exists but inaccurately (e.g., wrong color, wrong count, wrong attribute).
+- **OCR Problem**: Incorrect reading of text visible in an image.
+- **Miscounting**: Incorrect count of objects or items.
+
+For each hallucinated span, provide:
+1. `start`: Character index where the hallucinated span begins (0-indexed)
+2. `end`: Character index where the hallucinated span ends (exclusive)
+3. `label`: One of "invention", "mischaracterization", "OCR", "miscounting"
+4. `prob`: Your confidence that this span is hallucinated (0.0 to 1.0)
+
+CRITICAL: Respond ONLY with a valid JSON array. If there are no hallucinations, respond with an empty array: []
+
+Example output:
+[{"start": 45, "end": 78, "label": "invention", "prob": 0.85}, {"start": 120, "end": 135, "label": "mischaracterization", "prob": 0.6}]"""
+
+
+def build_user_prompt(sample: dict) -> str:
+    """Build the user message for hallucination detection."""
+    prompt = sample["prompt"]
+    response = sample["response"]
+    image_name = sample.get("image_name", "unknown")
+
+    return (
+        f"Image filename: {image_name}\n\n"
+        f"User's question about the image:\n{prompt}\n\n"
+        f"Model's response (analyze this for hallucinations):\n{response}\n\n"
+        f"The response has {len(response)} characters (0-indexed from 0 to "
+        f"{len(response) - 1}).\n\n"
+        f"Identify ALL hallucinated spans as a JSON array. "
+        f"Be precise with character indices. If no hallucination, return []."
+    )
+
+
+def parse_model_output(output_text: str) -> list[dict]:
+    """Parse the model's JSON output into a list of label dicts.
+
+    Handles common formatting issues: thinking tags, markdown code blocks, etc.
+    """
+    text = output_text.strip()
+
+    # Remove thinking/reasoning tags if present (Qwen3 thinking model)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<\|think\|>.*?<\|/think\|>", "", text, flags=re.DOTALL)
+
+    # Remove markdown code block wrappers
+    text = re.sub(r"```json\s*", "", text)
+    text = re.sub(r"```\s*", "", text)
+    text = text.strip()
+
+    # Try to find a JSON array in the text
+    # Look for the outermost [...] pattern
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if match:
+        json_str = match.group(0)
+        try:
+            parsed = json.loads(json_str)
+            if isinstance(parsed, list):
+                # Validate and clean each label
+                cleaned = []
+                for item in parsed:
+                    if isinstance(item, dict) and "start" in item and "end" in item:
+                        cleaned.append({
+                            "start": int(item["start"]),
+                            "end": int(item["end"]),
+                            "label": str(item.get("label", "invention")),
+                            "prob": float(item.get("prob", item.get("confidence", 0.5))),
+                        })
+                return cleaned
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+    # If no valid JSON found, return empty
+    return []
+
+
+# ============================================================================
+# Model Inference
+# ============================================================================
+
+def load_model(model_id: str):
+    """Load the Qwen3-VL model and processor."""
+    from transformers import AutoProcessor, AutoModelForCausalLM
+
+    logger.info(f"Loading model: {model_id}")
+    logger.info(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+
+    # Determine dtype
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        dtype = torch.bfloat16
+        logger.info("Using bfloat16")
+    elif torch.cuda.is_available():
+        dtype = torch.float16
+        logger.info("Using float16")
+    else:
+        dtype = torch.float32
+        logger.info("Using float32 (CPU)")
+
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=dtype,
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    model.eval()
+
+    logger.info("Model loaded successfully")
+    return model, processor
+
+
+def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) -> str:
+    """Run hallucination detection inference on a single sample."""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": build_user_prompt(sample)},
+    ]
+
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    inputs = processor(text, return_tensors="pt")
+    # Move to model device
+    device = next(model.parameters()).device
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,        # Greedy for reproducibility
+            temperature=None,
+            top_p=None,
+        )
+
+    # Decode only the generated tokens (not the prompt)
+    input_len = inputs["input_ids"].shape[1]
+    generated_ids = output_ids[0][input_len:]
+    response = processor.decode(generated_ids, skip_special_tokens=True)
+
+    return response
+
+
+# ============================================================================
+# Checkpoint Management
+# ============================================================================
+
+def load_checkpoint(checkpoint_path: Path) -> dict:
+    """Load checkpoint if it exists."""
+    if checkpoint_path.exists():
+        with open(checkpoint_path, "r", encoding="utf-8") as f:
+            ckpt = json.load(f)
+        logger.info(
+            f"Resumed from checkpoint: {ckpt['processed']} samples processed"
+        )
+        return ckpt
+    return {"processed": 0, "predictions": [], "raw_outputs": []}
+
+
+def save_checkpoint(checkpoint_path: Path, ckpt: dict):
+    """Save checkpoint to disk."""
+    with open(checkpoint_path, "w", encoding="utf-8") as f:
+        json.dump(ckpt, f, ensure_ascii=False)
+
+
+# ============================================================================
+# Main Evaluation Pipeline
+# ============================================================================
+
+def evaluate(args):
+    """Run the full evaluation pipeline."""
+    start_time = time.time()
+
+    # ── Setup output directory ──
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = OUTPUT_DIR / "checkpoint.json"
+    csv_path = OUTPUT_DIR / "predictions_en.csv"
+    json_path = OUTPUT_DIR / "metrics_en.json"
+    predictions_jsonl_path = OUTPUT_DIR / "predictions_en.jsonl"
+
+    # ── Load and split data ──
+    logger.info("=" * 60)
+    logger.info("SHROOM-Visions Evaluation Pipeline")
+    logger.info("=" * 60)
+
+    all_samples = load_data(TRAIN_FILE)
+    eval_samples = split_eval_data(all_samples, ratio=EVAL_SPLIT_RATIO, seed=RANDOM_SEED)
+
+    if args.max_samples and args.max_samples < len(eval_samples):
+        eval_samples = eval_samples[:args.max_samples]
+        logger.info(f"Limited to {args.max_samples} samples (--max_samples)")
+
+    # ── Load model ──
+    model, processor = load_model(args.model_id)
+
+    # ── Load checkpoint if resuming ──
+    if args.resume:
+        ckpt = load_checkpoint(checkpoint_path)
+    else:
+        ckpt = {"processed": 0, "predictions": [], "raw_outputs": []}
+
+    # ── Inference loop ──
+    logger.info(f"\nRunning inference on {len(eval_samples)} samples...")
+    logger.info(f"Starting from sample {ckpt['processed']}")
+
+    for idx in tqdm(range(ckpt["processed"], len(eval_samples)),
+                    desc="Evaluating", initial=ckpt["processed"],
+                    total=len(eval_samples)):
+        sample = eval_samples[idx]
+
+        try:
+            raw_output = run_inference(model, processor, sample,
+                                       max_new_tokens=args.max_new_tokens)
+            pred_labels = parse_model_output(raw_output)
+        except Exception as e:
+            logger.warning(f"Error on sample {sample['id']}: {e}")
+            raw_output = ""
+            pred_labels = []
+
+        ckpt["predictions"].append({
+            "id": sample["id"],
+            "pred_labels": pred_labels,
+            "gold_labels": sample.get("labels", []),
+            "response_length": len(sample["response"]),
+            "response": sample["response"],
+            "prompt": sample["prompt"],
+            "image_name": sample.get("image_name", ""),
+        })
+        ckpt["raw_outputs"].append({
+            "id": sample["id"],
+            "raw_model_output": raw_output,
+        })
+        ckpt["processed"] = idx + 1
+
+        # Save checkpoint every 25 samples
+        if (idx + 1) % 25 == 0:
+            save_checkpoint(checkpoint_path, ckpt)
+            logger.info(f"Checkpoint saved at sample {idx + 1}")
+
+    # Final checkpoint save
+    save_checkpoint(checkpoint_path, ckpt)
+
+    # ── Compute metrics ──
+    logger.info("\n" + "=" * 60)
+    logger.info("Computing Metrics")
+    logger.info("=" * 60)
+
+    per_sample_metrics = []
+    category_metrics = {
+        "invention": {"iou_list": [], "cal_list": []},
+        "mischaracterization": {"iou_list": [], "cal_list": []},
+        "OCR": {"iou_list": [], "cal_list": []},
+        "miscounting": {"iou_list": [], "cal_list": []},
+    }
+
+    for pred in ckpt["predictions"]:
+        gold = pred["gold_labels"]
+        predicted = pred["pred_labels"]
+        resp_len = pred["response_length"]
+
+        iou = compute_iou(gold, predicted, resp_len)
+        cal = compute_calibration(gold, predicted, resp_len)
+
+        has_gold_halluc = len(gold) > 0
+        has_pred_halluc = len(predicted) > 0
+
+        sample_metrics = {
+            "id": pred["id"],
+            "iou": iou,
+            "calibration": cal,
+            "gold_span_count": len(gold),
+            "pred_span_count": len(predicted),
+            "has_gold_hallucination": has_gold_halluc,
+            "has_pred_hallucination": has_pred_halluc,
+            "response_length": resp_len,
+        }
+        per_sample_metrics.append(sample_metrics)
+
+        # Track per-category performance
+        if gold:
+            gold_categories = set(lbl["label"] for lbl in gold)
+            for cat in gold_categories:
+                cat_gold = [l for l in gold if l["label"] == cat]
+                cat_pred = [l for l in predicted if l["label"] == cat]
+                cat_iou = compute_iou(cat_gold, cat_pred, resp_len)
+                cat_cal = compute_calibration(cat_gold, cat_pred, resp_len)
+                if cat in category_metrics:
+                    category_metrics[cat]["iou_list"].append(cat_iou)
+                    if cat_cal is not None:
+                        category_metrics[cat]["cal_list"].append(cat_cal)
+
+    # ── Aggregate metrics ──
+    iou_scores = [m["iou"] for m in per_sample_metrics]
+    cal_scores = [m["calibration"] for m in per_sample_metrics if m["calibration"] is not None]
+
+    # Samples with hallucinations only
+    halluc_iou = [m["iou"] for m in per_sample_metrics if m["has_gold_hallucination"]]
+    halluc_cal = [m["calibration"] for m in per_sample_metrics
+                  if m["has_gold_hallucination"] and m["calibration"] is not None]
+
+    # No-hallucination samples
+    clean_iou = [m["iou"] for m in per_sample_metrics if not m["has_gold_hallucination"]]
+
+    # Detection stats
+    n_total = len(per_sample_metrics)
+    n_gold_halluc = sum(1 for m in per_sample_metrics if m["has_gold_hallucination"])
+    n_pred_halluc = sum(1 for m in per_sample_metrics if m["has_pred_hallucination"])
+    n_correct_clean = sum(
+        1 for m in per_sample_metrics
+        if not m["has_gold_hallucination"] and not m["has_pred_hallucination"]
+    )
+    n_correct_halluc = sum(
+        1 for m in per_sample_metrics
+        if m["has_gold_hallucination"] and m["has_pred_hallucination"]
+    )
+
+    overall_results = {
+        "model": args.model_id,
+        "language": "en",
+        "eval_samples": n_total,
+        "eval_split_ratio": EVAL_SPLIT_RATIO,
+        "random_seed": RANDOM_SEED,
+        "metrics": {
+            "overall": {
+                "iou_mean": float(np.mean(iou_scores)) if iou_scores else 0.0,
+                "iou_std": float(np.std(iou_scores)) if iou_scores else 0.0,
+                "iou_median": float(np.median(iou_scores)) if iou_scores else 0.0,
+                "calibration_mean": float(np.mean(cal_scores)) if cal_scores else 0.0,
+                "calibration_std": float(np.std(cal_scores)) if cal_scores else 0.0,
+                "calibration_median": float(np.median(cal_scores)) if cal_scores else 0.0,
+            },
+            "hallucinated_samples": {
+                "count": n_gold_halluc,
+                "iou_mean": float(np.mean(halluc_iou)) if halluc_iou else 0.0,
+                "iou_std": float(np.std(halluc_iou)) if halluc_iou else 0.0,
+                "calibration_mean": float(np.mean(halluc_cal)) if halluc_cal else 0.0,
+                "calibration_std": float(np.std(halluc_cal)) if halluc_cal else 0.0,
+            },
+            "clean_samples": {
+                "count": n_total - n_gold_halluc,
+                "iou_mean": float(np.mean(clean_iou)) if clean_iou else 0.0,
+            },
+            "detection_stats": {
+                "gold_has_hallucination": n_gold_halluc,
+                "pred_has_hallucination": n_pred_halluc,
+                "correct_clean": n_correct_clean,
+                "correct_halluc": n_correct_halluc,
+                "detection_accuracy": (n_correct_clean + n_correct_halluc) / n_total if n_total > 0 else 0.0,
+            },
+            "per_category": {},
+        },
+        "timing": {
+            "total_seconds": round(time.time() - start_time, 2),
+            "samples_per_second": round(n_total / (time.time() - start_time), 4) if (time.time() - start_time) > 0 else 0,
+        },
+    }
+
+    # Per-category metrics
+    for cat, data in category_metrics.items():
+        if data["iou_list"]:
+            overall_results["metrics"]["per_category"][cat] = {
+                "sample_count": len(data["iou_list"]),
+                "iou_mean": float(np.mean(data["iou_list"])),
+                "iou_std": float(np.std(data["iou_list"])),
+                "calibration_mean": float(np.mean(data["cal_list"])) if data["cal_list"] else None,
+                "calibration_std": float(np.std(data["cal_list"])) if data["cal_list"] else None,
+            }
+
+    # ── Save outputs ──
+
+    # 1. CSV with per-sample predictions
+    logger.info(f"\nSaving predictions CSV to {csv_path}")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "id", "prompt", "image_name", "response_length",
+            "gold_span_count", "pred_span_count",
+            "gold_labels_json", "pred_labels_json",
+            "iou", "calibration",
+            "has_gold_hallucination", "has_pred_hallucination",
+        ])
+        for pred, metrics in zip(ckpt["predictions"], per_sample_metrics):
+            writer.writerow([
+                pred["id"],
+                pred["prompt"],
+                pred["image_name"],
+                pred["response_length"],
+                metrics["gold_span_count"],
+                metrics["pred_span_count"],
+                json.dumps(pred["gold_labels"], ensure_ascii=False),
+                json.dumps(pred["pred_labels"], ensure_ascii=False),
+                f"{metrics['iou']:.6f}",
+                f"{metrics['calibration']:.6f}" if metrics["calibration"] is not None else "",
+                metrics["has_gold_hallucination"],
+                metrics["has_pred_hallucination"],
+            ])
+
+    # 2. JSONL with full predictions (for potential submission / further analysis)
+    logger.info(f"Saving predictions JSONL to {predictions_jsonl_path}")
+    with open(predictions_jsonl_path, "w", encoding="utf-8") as f:
+        for pred in ckpt["predictions"]:
+            f.write(json.dumps({
+                "id": pred["id"],
+                "pred_labels": pred["pred_labels"],
+                "gold_labels": pred["gold_labels"],
+                "response": pred["response"],
+                "prompt": pred["prompt"],
+                "image_name": pred["image_name"],
+            }, ensure_ascii=False) + "\n")
+
+    # 3. JSON with aggregated metrics
+    logger.info(f"Saving metrics JSON to {json_path}")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(overall_results, f, indent=2, ensure_ascii=False)
+
+    # ── Print summary table ──
+    print("\n")
+    print("=" * 70)
+    print("  SHROOM-Visions Evaluation Summary")
+    print(f"  Model: {args.model_id}")
+    print(f"  Language: English | Eval Samples: {n_total}")
+    print(f"  Time: {overall_results['timing']['total_seconds']:.1f}s "
+          f"({overall_results['timing']['samples_per_second']:.2f} samples/s)")
+    print("=" * 70)
+
+    # Overall metrics table
+    overall_table = [
+        ["Overall IoU (mean ± std)",
+         f"{overall_results['metrics']['overall']['iou_mean']:.4f} ± "
+         f"{overall_results['metrics']['overall']['iou_std']:.4f}"],
+        ["Overall IoU (median)",
+         f"{overall_results['metrics']['overall']['iou_median']:.4f}"],
+        ["Overall Calibration (mean ± std)",
+         f"{overall_results['metrics']['overall']['calibration_mean']:.4f} ± "
+         f"{overall_results['metrics']['overall']['calibration_std']:.4f}"],
+        ["Overall Calibration (median)",
+         f"{overall_results['metrics']['overall']['calibration_median']:.4f}"],
+    ]
+    print("\n📊 Overall Metrics:")
+    print(tabulate(overall_table, headers=["Metric", "Value"],
+                   tablefmt="rounded_outline"))
+
+    # Hallucinated vs clean breakdown
+    breakdown_table = [
+        ["With Hallucinations",
+         n_gold_halluc,
+         f"{overall_results['metrics']['hallucinated_samples']['iou_mean']:.4f}" if halluc_iou else "N/A",
+         f"{overall_results['metrics']['hallucinated_samples']['calibration_mean']:.4f}" if halluc_cal else "N/A"],
+        ["Clean (No Hallucination)",
+         n_total - n_gold_halluc,
+         f"{overall_results['metrics']['clean_samples']['iou_mean']:.4f}" if clean_iou else "N/A",
+         "N/A"],
+    ]
+    print("\n📋 Breakdown by Hallucination Presence:")
+    print(tabulate(breakdown_table,
+                   headers=["Category", "Count", "IoU", "Calibration"],
+                   tablefmt="rounded_outline"))
+
+    # Detection accuracy
+    detect_table = [
+        ["Gold has hallucination", n_gold_halluc],
+        ["Predicted has hallucination", n_pred_halluc],
+        ["Correctly identified clean", n_correct_clean],
+        ["Correctly identified hallucinated", n_correct_halluc],
+        ["Detection Accuracy",
+         f"{overall_results['metrics']['detection_stats']['detection_accuracy']:.4f}"],
+    ]
+    print("\n🎯 Detection Statistics:")
+    print(tabulate(detect_table, headers=["Stat", "Value"],
+                   tablefmt="rounded_outline"))
+
+    # Per-category metrics
+    if overall_results["metrics"]["per_category"]:
+        cat_table = []
+        for cat, data in overall_results["metrics"]["per_category"].items():
+            cat_table.append([
+                cat,
+                data["sample_count"],
+                f"{data['iou_mean']:.4f} ± {data['iou_std']:.4f}",
+                f"{data['calibration_mean']:.4f}" if data["calibration_mean"] is not None else "N/A",
+            ])
+        print("\n🏷️  Per-Category Metrics:")
+        print(tabulate(cat_table,
+                       headers=["Category", "Samples", "IoU (mean ± std)", "Calibration"],
+                       tablefmt="rounded_outline"))
+
+    print("\n" + "=" * 70)
+    print(f"  📁 Results saved to: {OUTPUT_DIR}")
+    print(f"     ├── {csv_path.name}           (per-sample CSV)")
+    print(f"     ├── {predictions_jsonl_path.name}  (full predictions JSONL)")
+    print(f"     └── {json_path.name}            (aggregated metrics JSON)")
+    print("=" * 70)
+
+    # Clean up checkpoint on successful completion
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+        logger.info("Checkpoint removed (evaluation complete)")
+
+    return overall_results
+
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="SHROOM-Visions Hallucination Detection Evaluation",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python evaluate.py                            # Full evaluation
+  python evaluate.py --max_samples 10           # Quick test (10 samples)
+  python evaluate.py --resume                   # Resume from checkpoint
+  python evaluate.py --model_id Qwen/Qwen3-VL-2B-Thinking
+        """,
+    )
+    parser.add_argument(
+        "--model_id", type=str, default=DEFAULT_MODEL_ID,
+        help=f"HuggingFace model ID (default: {DEFAULT_MODEL_ID})",
+    )
+    parser.add_argument(
+        "--max_samples", type=int, default=None,
+        help="Limit number of eval samples (for testing)",
+    )
+    parser.add_argument(
+        "--max_new_tokens", type=int, default=2048,
+        help="Max tokens for model generation (default: 2048)",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume from last checkpoint",
+    )
+
+    args = parser.parse_args()
+
+    # Validate data file exists
+    if not TRAIN_FILE.exists():
+        logger.error(f"Data file not found: {TRAIN_FILE}")
+        logger.error(
+            "Make sure shroom-visions-data is extracted in the project root."
+        )
+        sys.exit(1)
+
+    evaluate(args)
+
+
+if __name__ == "__main__":
+    main()
