@@ -54,7 +54,8 @@ if [ ! -d "shroom-visions-data/distrib" ]; then
     echo "  Downloading data zip..."
     wget -q --show-progress -O shroom-visions-data.zip "$DATA_URL"
     echo "  Extracting data..."
-    $PYTHON -c "import zipfile; zipfile.ZipFile('shroom-visions-data.zip').extractall()"
+    rm -rf distrib
+    $PYTHON -c "import zipfile; zipfile.ZipFile('shroom-visions-data.zip').extractall('shroom-visions-data')"
     rm -f shroom-visions-data.zip
     echo "  Data extracted to shroom-visions-data/"
 else
@@ -118,10 +119,10 @@ if [ -n "$CUDA_VERSION" ]; then
         echo "  Defaulting to CUDA 12.1 PyTorch build"
     fi
 
-    pip install torch --index-url "$TORCH_INDEX"
+    pip install --force-reinstall --no-cache-dir torch --index-url "$TORCH_INDEX"
 else
     echo "  No CUDA detected, installing CPU PyTorch"
-    pip install torch --index-url https://download.pytorch.org/whl/cpu
+    pip install --force-reinstall --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 fi
 
 # ── Install other dependencies ──
