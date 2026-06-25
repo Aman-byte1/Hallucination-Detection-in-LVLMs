@@ -38,7 +38,7 @@ from tqdm import tqdm
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-2B-Thinking"
 DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
-IMAGES_DIR = Path(__file__).parent / "shroom-visions-images"
+IMAGES_DIR = Path(__file__).parent / "shroom-vis-images"
 OUTPUT_DIR = Path(__file__).parent / "outputs"
 TRAIN_FILE = DATA_DIR / "shroom-vision.train.en.labeled.jsonl"
 EVAL_SPLIT_RATIO = 0.10  # Use 10% of training data for evaluation

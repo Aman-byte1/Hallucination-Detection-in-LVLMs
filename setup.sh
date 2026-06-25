@@ -73,7 +73,7 @@ if [ -f "shroom-visions-images.tar.gz" ]; then
     $PYTHON -c "import tarfile; tarfile.open('shroom-visions-images.tar.gz').extractall()"
     rm -f shroom-visions-images.tar.gz
     echo "  Images extracted."
-elif [ ! -d "shroom-visions-images" ]; then
+elif [ ! -d "shroom-vis-images" ]; then
     echo "  Downloading images tar.gz..."
     wget -q --show-progress -O shroom-visions-images.tar.gz "$IMAGES_URL"
     echo "  Extracting images (this may take a while)..."
@@ -178,8 +178,12 @@ else:
 echo ""
 if [ -f "shroom-visions-data/distrib/shroom-vision.train.en.labeled.jsonl" ]; then
     echo "  ✓ English train data found"
+fi
+
+if [ -d "shroom-vis-images" ]; then
+    echo "  ✓ Images folder found"
 else
-    echo "  ✗ English train data NOT found!"
+    echo "  ✗ Images folder NOT found!"
 fi
 
 echo ""
