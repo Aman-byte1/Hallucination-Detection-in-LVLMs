@@ -242,22 +242,31 @@ def parse_model_output(output_text: str) -> list[dict]:
 
 def find_image(image_name: str, base_dir: Path) -> Path | None:
     """Find the image path in the base_dir, recursively if necessary."""
+    import urllib.parse
+    
     if not base_dir.exists():
         return None
     
-    # Try direct check first
-    direct_path = base_dir / image_name
-    if direct_path.exists():
-        return direct_path
-    
-    # Try recursive check if not found directly
-    try:
-        matches = list(base_dir.glob(f"**/{image_name}"))
-        if matches:
-            return matches[0]
-    except Exception:
-        pass
+    # Try with both the raw name and the URL-decoded name
+    names_to_try = [image_name]
+    decoded_name = urllib.parse.unquote(image_name)
+    if decoded_name != image_name:
+        names_to_try.append(decoded_name)
         
+    for name in names_to_try:
+        # Try direct check first
+        direct_path = base_dir / name
+        if direct_path.exists():
+            return direct_path
+        
+        # Try recursive check if not found directly
+        try:
+            matches = list(base_dir.glob(f"**/{name}"))
+            if matches:
+                return matches[0]
+        except Exception:
+            pass
+            
     return None
 
 
@@ -349,28 +358,31 @@ def load_model(model_id: str):
 
 def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) -> str:
     """Run hallucination detection inference on a single sample."""
-    # Find the image URI if the image exists
+    from PIL import Image
+
+    # Find the image if it exists
     image_name = sample.get("image_name", "")
     image_path = None
     if image_name:
         image_path = find_image(image_name, IMAGES_DIR)
 
+    image = None
     if image_path is not None:
         try:
-            image_uri = image_path.resolve().as_uri()
-            user_content = [
-                {"type": "image", "image": image_uri},
-                {"type": "text", "text": build_user_prompt(sample)},
-            ]
-            logger.debug(f"Loaded image: {image_name} (using {image_uri})")
+            image = Image.open(image_path).convert("RGB")
+            logger.debug(f"Loaded PIL Image object for: {image_name} from {image_path}")
         except Exception as e:
-            logger.debug(f"Error resolving image URI for {image_name}: {e}. Falling back to text-only.")
-            user_content = [
-                {"type": "text", "text": build_user_prompt(sample)},
-            ]
+            logger.warning(f"Error opening image {image_path} for {image_name}: {e}. Falling back to text-only.")
+
+    # Build the messages according to whether image is available
+    if image is not None:
+        user_content = [
+            {"type": "image", "image": image},
+            {"type": "text", "text": build_user_prompt(sample)},
+        ]
     else:
         if image_name:
-            logger.debug(f"Image {image_name} not found in {IMAGES_DIR}. Running in text-only mode.")
+            logger.debug(f"Image {image_name} not found or failed to load. Running in text-only mode.")
         user_content = [
             {"type": "text", "text": build_user_prompt(sample)},
         ]
