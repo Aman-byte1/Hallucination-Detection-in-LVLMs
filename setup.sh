@@ -51,8 +51,10 @@ DATA_URL="https://a3s.fi/mickusti-2007780-pub/shroom-visions-data.zip"
 IMAGES_URL="https://a3s.fi/mickusti-2007780-pub/shroom-visions-images.tar.gz"
 
 if [ ! -d "shroom-visions-data/distrib" ]; then
-    echo "  Downloading data zip..."
-    wget -q --show-progress -O shroom-visions-data.zip "$DATA_URL"
+    if [ ! -f "shroom-visions-data.zip" ]; then
+        echo "  Downloading data zip..."
+        wget -q --show-progress -O shroom-visions-data.zip "$DATA_URL"
+    fi
     echo "  Extracting data..."
     rm -rf distrib
     $PYTHON -c "import zipfile; zipfile.ZipFile('shroom-visions-data.zip').extractall('shroom-visions-data')"
@@ -63,8 +65,10 @@ else
 fi
 
 if [ ! -d "shroom-visions-images" ]; then
-    echo "  Downloading images tar.gz..."
-    wget -q --show-progress -O shroom-visions-images.tar.gz "$IMAGES_URL"
+    if [ ! -f "shroom-visions-images.tar.gz" ]; then
+        echo "  Downloading images tar.gz..."
+        wget -q --show-progress -O shroom-visions-images.tar.gz "$IMAGES_URL"
+    fi
     echo "  Extracting images (this may take a while)..."
     $PYTHON -c "import tarfile; tarfile.open('shroom-visions-images.tar.gz').extractall()"
     rm -f shroom-visions-images.tar.gz
