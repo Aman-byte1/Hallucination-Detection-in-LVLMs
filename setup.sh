@@ -54,7 +54,7 @@ if [ ! -d "shroom-visions-data/distrib" ]; then
     echo "  Downloading data zip..."
     wget -q --show-progress -O shroom-visions-data.zip "$DATA_URL"
     echo "  Extracting data..."
-    unzip -q -o shroom-visions-data.zip
+    $PYTHON -c "import zipfile; zipfile.ZipFile('shroom-visions-data.zip').extractall()"
     rm -f shroom-visions-data.zip
     echo "  Data extracted to shroom-visions-data/"
 else
@@ -65,7 +65,7 @@ if [ ! -d "shroom-visions-images" ]; then
     echo "  Downloading images tar.gz..."
     wget -q --show-progress -O shroom-visions-images.tar.gz "$IMAGES_URL"
     echo "  Extracting images (this may take a while)..."
-    tar -xzf shroom-visions-images.tar.gz
+    $PYTHON -c "import tarfile; tarfile.open('shroom-visions-images.tar.gz').extractall()"
     rm -f shroom-visions-images.tar.gz
     echo "  Images extracted."
 else
