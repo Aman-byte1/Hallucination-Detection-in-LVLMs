@@ -269,7 +269,7 @@ def load_model(model_id: str):
     logger.info(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
-        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
     # Determine dtype
     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
