@@ -199,6 +199,7 @@ def parse_model_output(output_text: str) -> list[dict]:
 
     Handles common formatting issues: thinking tags, markdown code blocks, etc.
     """
+    import ast
     text = output_text.strip()
 
     # Remove thinking/reasoning tags if present (Qwen3 thinking model)
@@ -215,25 +216,51 @@ def parse_model_output(output_text: str) -> list[dict]:
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if match:
         json_str = match.group(0)
+        
+        # 1. Try standard json parsing
         try:
             parsed = json.loads(json_str)
             if isinstance(parsed, list):
-                # Validate and clean each label
-                cleaned = []
-                for item in parsed:
-                    if isinstance(item, dict) and "start" in item and "end" in item:
-                        cleaned.append({
-                            "start": int(item["start"]),
-                            "end": int(item["end"]),
-                            "label": str(item.get("label", "invention")),
-                            "prob": float(item.get("prob", item.get("confidence", 0.5))),
-                        })
-                return cleaned
-        except (json.JSONDecodeError, ValueError, TypeError):
+                return clean_labels(parsed)
+        except json.JSONDecodeError:
+            pass
+
+        # 2. Try ast.literal_eval for single quotes/python-like lists
+        try:
+            parsed = ast.literal_eval(json_str)
+            if isinstance(parsed, list):
+                return clean_labels(parsed)
+        except (ValueError, SyntaxError):
+            pass
+
+        # 3. Try replacing single quotes with double quotes
+        try:
+            fixed_str = json_str.replace("'", '"')
+            parsed = json.loads(fixed_str)
+            if isinstance(parsed, list):
+                return clean_labels(parsed)
+        except json.JSONDecodeError:
             pass
 
     # If no valid JSON found, return empty
     return []
+
+
+def clean_labels(parsed_list: list) -> list[dict]:
+    """Validate and normalize labels list."""
+    cleaned = []
+    for item in parsed_list:
+        if isinstance(item, dict) and "start" in item and "end" in item:
+            try:
+                cleaned.append({
+                    "start": int(item["start"]),
+                    "end": int(item["end"]),
+                    "label": str(item.get("label", "invention")),
+                    "prob": float(item.get("prob", item.get("confidence", 0.5))),
+                })
+            except (ValueError, TypeError):
+                pass
+    return cleaned
 
 
 # ============================================================================
@@ -517,8 +544,9 @@ def evaluate(args):
             raw_output = run_inference(model, processor, sample,
                                        max_new_tokens=args.max_new_tokens)
             pred_labels = parse_model_output(raw_output)
+            tqdm.write(f"Sample {sample['id']} - Predicted {len(pred_labels)} spans")
         except Exception as e:
-            logger.warning(f"Error on sample {sample['id']}: {e}")
+            tqdm.write(f"Error on sample {sample['id']}: {e}")
             raw_output = ""
             pred_labels = []
 
