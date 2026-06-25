@@ -38,6 +38,7 @@ from tqdm import tqdm
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-2B-Thinking"
 DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
+IMAGES_DIR = Path(__file__).parent / "shroom-visions-images"
 OUTPUT_DIR = Path(__file__).parent / "outputs"
 TRAIN_FILE = DATA_DIR / "shroom-vision.train.en.labeled.jsonl"
 EVAL_SPLIT_RATIO = 0.10  # Use 10% of training data for evaluation
@@ -239,9 +240,30 @@ def parse_model_output(output_text: str) -> list[dict]:
 # Model Inference
 # ============================================================================
 
+def find_image(image_name: str, base_dir: Path) -> Path | None:
+    """Find the image path in the base_dir, recursively if necessary."""
+    if not base_dir.exists():
+        return None
+    
+    # Try direct check first
+    direct_path = base_dir / image_name
+    if direct_path.exists():
+        return direct_path
+    
+    # Try recursive check if not found directly
+    try:
+        matches = list(base_dir.glob(f"**/{image_name}"))
+        if matches:
+            return matches[0]
+    except Exception:
+        pass
+        
+    return None
+
+
 def load_model(model_id: str):
     """Load the Qwen3-VL model and processor."""
-    from transformers import AutoProcessor, AutoModelForCausalLM
+    from transformers import AutoProcessor
 
     logger.info(f"Loading model: {model_id}")
     logger.info(f"CUDA available: {torch.cuda.is_available()}")
@@ -262,12 +284,26 @@ def load_model(model_id: str):
 
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=dtype,
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    # Attempt loading with AutoModelForVision2Seq first, then fall back to AutoModelForCausalLM
+    try:
+        from transformers import AutoModelForVision2Seq
+        logger.info("Attempting to load model with AutoModelForVision2Seq...")
+        model = AutoModelForVision2Seq.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+    except Exception as e:
+        logger.info(f"Failed to load with AutoModelForVision2Seq ({e}). Falling back to AutoModelForCausalLM...")
+        from transformers import AutoModelForCausalLM
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+        
     model.eval()
 
     logger.info("Model loaded successfully")
@@ -276,16 +312,64 @@ def load_model(model_id: str):
 
 def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) -> str:
     """Run hallucination detection inference on a single sample."""
+    # Find the image URI if the image exists
+    image_name = sample.get("image_name", "")
+    image_path = None
+    if image_name:
+        image_path = find_image(image_name, IMAGES_DIR)
+
+    if image_path is not None:
+        try:
+            image_uri = image_path.resolve().as_uri()
+            user_content = [
+                {"type": "image", "image": image_uri},
+                {"type": "text", "text": build_user_prompt(sample)},
+            ]
+            logger.info(f"Loaded image: {image_name} (using {image_uri})")
+        except Exception as e:
+            logger.warning(f"Error resolving image URI for {image_name}: {e}. Falling back to text-only.")
+            user_content = [
+                {"type": "text", "text": build_user_prompt(sample)},
+            ]
+    else:
+        if image_name:
+            logger.warning(f"Image {image_name} not found in {IMAGES_DIR}. Running in text-only mode.")
+        user_content = [
+            {"type": "text", "text": build_user_prompt(sample)},
+        ]
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": build_user_prompt(sample)},
+        {"role": "user", "content": user_content},
     ]
 
     text = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    inputs = processor(text, return_tensors="pt")
+    try:
+        from qwen_vl_utils import process_vision_info
+        vision_outputs = process_vision_info(messages)
+        if len(vision_outputs) == 3:
+            image_inputs, video_inputs, _ = vision_outputs
+        else:
+            image_inputs, video_inputs = vision_outputs
+    except ImportError:
+        logger.warning("qwen-vl-utils not installed. Attempting standard processor call.")
+        image_inputs, video_inputs = None, None
+
+    kwargs = {
+        "text": [text],
+        "padding": True,
+        "return_tensors": "pt"
+    }
+    if image_inputs is not None:
+        kwargs["images"] = image_inputs
+    if video_inputs is not None:
+        kwargs["videos"] = video_inputs
+
+    inputs = processor(**kwargs)
+
     # Move to model device
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}

@@ -32,10 +32,13 @@ models/
 .cache/
 huggingface_cache/
 
-# Data files (large)
+# Data files (large - downloaded via setup.sh)
 shroom-visions-data/
+shroom-visions-images/
 shroom-visions-data.zip
+shroom-visions-images.tar.gz
 *.zip
+*.tar.gz
 
 # Outputs (regeneratable)
 outputs/
