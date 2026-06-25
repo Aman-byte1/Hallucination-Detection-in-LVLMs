@@ -284,25 +284,62 @@ def load_model(model_id: str):
 
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
 
-    # Attempt loading with AutoModelForVision2Seq first, then fall back to AutoModelForCausalLM
+    model = None
+    # 1. Try Qwen3VLForConditionalGeneration directly (best class for Qwen3-VL)
     try:
-        from transformers import AutoModelForVision2Seq
-        logger.info("Attempting to load model with AutoModelForVision2Seq...")
-        model = AutoModelForVision2Seq.from_pretrained(
+        from transformers import Qwen3VLForConditionalGeneration
+        logger.info("Attempting to load model with Qwen3VLForConditionalGeneration...")
+        model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_id,
             torch_dtype=dtype,
             device_map="auto",
             trust_remote_code=True,
         )
     except Exception as e:
-        logger.info(f"Failed to load with AutoModelForVision2Seq ({e}). Falling back to AutoModelForCausalLM...")
-        from transformers import AutoModelForCausalLM
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype=dtype,
-            device_map="auto",
-            trust_remote_code=True,
-        )
+        logger.info(f"Failed to load with Qwen3VLForConditionalGeneration: {e}")
+
+    # 2. Try AutoModelForImageTextToText (new standard auto class in transformers 5.x)
+    if model is None:
+        try:
+            from transformers import AutoModelForImageTextToText
+            logger.info("Attempting to load model with AutoModelForImageTextToText...")
+            model = AutoModelForImageTextToText.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+        except Exception as e:
+            logger.info(f"Failed to load with AutoModelForImageTextToText: {e}")
+
+    # 3. Try AutoModelForVision2Seq (classic vision-to-seq auto class)
+    if model is None:
+        try:
+            from transformers import AutoModelForVision2Seq
+            logger.info("Attempting to load model with AutoModelForVision2Seq...")
+            model = AutoModelForVision2Seq.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+        except Exception as e:
+            logger.info(f"Failed to load with AutoModelForVision2Seq: {e}")
+
+    # 4. Fallback to AutoModelForCausalLM
+    if model is None:
+        try:
+            from transformers import AutoModelForCausalLM
+            logger.info("Attempting to load model with AutoModelForCausalLM...")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+        except Exception as e:
+            logger.info(f"Failed to load with AutoModelForCausalLM: {e}")
+            raise RuntimeError(f"Could not load model {model_id} with any AutoModel classes.")
         
     model.eval()
 
