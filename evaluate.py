@@ -325,15 +325,15 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) ->
                 {"type": "image", "image": image_uri},
                 {"type": "text", "text": build_user_prompt(sample)},
             ]
-            logger.info(f"Loaded image: {image_name} (using {image_uri})")
+            logger.debug(f"Loaded image: {image_name} (using {image_uri})")
         except Exception as e:
-            logger.warning(f"Error resolving image URI for {image_name}: {e}. Falling back to text-only.")
+            logger.debug(f"Error resolving image URI for {image_name}: {e}. Falling back to text-only.")
             user_content = [
                 {"type": "text", "text": build_user_prompt(sample)},
             ]
     else:
         if image_name:
-            logger.warning(f"Image {image_name} not found in {IMAGES_DIR}. Running in text-only mode.")
+            logger.debug(f"Image {image_name} not found in {IMAGES_DIR}. Running in text-only mode.")
         user_content = [
             {"type": "text", "text": build_user_prompt(sample)},
         ]
@@ -435,6 +435,12 @@ def evaluate(args):
 
     all_samples = load_data(TRAIN_FILE)
     eval_samples = split_eval_data(all_samples, ratio=EVAL_SPLIT_RATIO, seed=RANDOM_SEED)
+
+    # ── Check images presence ──
+    if not IMAGES_DIR.exists() or not any(IMAGES_DIR.iterdir()):
+        logger.warning(f"Images folder {IMAGES_DIR} is missing or empty. The evaluation will run in TEXT-ONLY fallback mode.")
+    else:
+        logger.info(f"Images folder found at {IMAGES_DIR}. Running in multimodal vision-language mode.")
 
     if args.max_samples and args.max_samples < len(eval_samples):
         eval_samples = eval_samples[:args.max_samples]

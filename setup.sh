@@ -101,39 +101,53 @@ echo ""
 echo "[5/7] Installing PyTorch with correct CUDA version..."
 pip install --upgrade pip
 
-# Determine the right PyTorch CUDA build
-if [ -n "$CUDA_VERSION" ]; then
-    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1)
-    CUDA_MINOR=$(echo $CUDA_VERSION | cut -d. -f2)
-    echo "  Detected CUDA: ${CUDA_MAJOR}.${CUDA_MINOR}"
+# Check if working torch and torchvision with CUDA support is already installed
+CUDA_OK=$(python -c "
+try:
+    import torch, torchvision
+    print(torch.cuda.is_available())
+except ImportError:
+    print('False')
+" 2>/dev/null || echo "False")
 
-    if [ "$CUDA_MAJOR" -ge 13 ]; then
-        TORCH_INDEX="https://download.pytorch.org/whl/cu128"
-        echo "  Using CUDA 12.8 PyTorch build (driver supports CUDA $CUDA_VERSION)"
-    elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 8 ]; then
-        TORCH_INDEX="https://download.pytorch.org/whl/cu128"
-        echo "  Using CUDA 12.8 PyTorch build"
-    elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 6 ]; then
-        TORCH_INDEX="https://download.pytorch.org/whl/cu126"
-        echo "  Using CUDA 12.6 PyTorch build"
-    elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 4 ]; then
-        TORCH_INDEX="https://download.pytorch.org/whl/cu124"
-        echo "  Using CUDA 12.4 PyTorch build"
-    elif [ "$CUDA_MAJOR" -eq 12 ]; then
-        TORCH_INDEX="https://download.pytorch.org/whl/cu121"
-        echo "  Using CUDA 12.1 PyTorch build"
-    elif [ "$CUDA_MAJOR" -eq 11 ]; then
-        TORCH_INDEX="https://download.pytorch.org/whl/cu118"
-        echo "  Using CUDA 11.8 PyTorch build"
-    else
-        TORCH_INDEX="https://download.pytorch.org/whl/cu121"
-        echo "  Defaulting to CUDA 12.1 PyTorch build"
-    fi
-
-    pip install --force-reinstall --no-cache-dir torch --index-url "$TORCH_INDEX"
+if [ "$CUDA_OK" = "True" ]; then
+    echo "  ✓ Working PyTorch and Torchvision with CUDA support are already installed. Skipping installation."
 else
-    echo "  No CUDA detected, installing CPU PyTorch"
-    pip install --force-reinstall --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+    echo "  Installing/fixing PyTorch and Torchvision..."
+    # Determine the right PyTorch CUDA build
+    if [ -n "$CUDA_VERSION" ]; then
+        CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1)
+        CUDA_MINOR=$(echo $CUDA_VERSION | cut -d. -f2)
+        echo "  Detected CUDA: ${CUDA_MAJOR}.${CUDA_MINOR}"
+
+        if [ "$CUDA_MAJOR" -ge 13 ]; then
+            TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+            echo "  Using CUDA 12.8 PyTorch build (driver supports CUDA $CUDA_VERSION)"
+        elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 8 ]; then
+            TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+            echo "  Using CUDA 12.8 PyTorch build"
+        elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 6 ]; then
+            TORCH_INDEX="https://download.pytorch.org/whl/cu126"
+            echo "  Using CUDA 12.6 PyTorch build"
+        elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 4 ]; then
+            TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+            echo "  Using CUDA 12.4 PyTorch build"
+        elif [ "$CUDA_MAJOR" -eq 12 ]; then
+            TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+            echo "  Using CUDA 12.1 PyTorch build"
+        elif [ "$CUDA_MAJOR" -eq 11 ]; then
+            TORCH_INDEX="https://download.pytorch.org/whl/cu118"
+            echo "  Using CUDA 11.8 PyTorch build"
+        else
+            TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+            echo "  Defaulting to CUDA 12.1 PyTorch build"
+        fi
+
+        pip install --force-reinstall --no-cache-dir torch torchvision --index-url "$TORCH_INDEX"
+    else
+        echo "  No CUDA detected, installing CPU PyTorch"
+        pip install --force-reinstall --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+    fi
 fi
 
 # ── Install other dependencies ──
@@ -147,8 +161,10 @@ echo ""
 echo "[7/7] Verifying setup..."
 python -c "
 import torch
+import torchvision
 import transformers
 print(f'  PyTorch:      {torch.__version__}')
+print(f'  Torchvision:  {torchvision.__version__}')
 print(f'  Transformers: {transformers.__version__}')
 print(f'  CUDA:         {torch.cuda.is_available()}')
 if torch.cuda.is_available():
