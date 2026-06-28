@@ -1023,12 +1023,13 @@ Examples:
         help="Limit number of eval samples (for testing)",
     )
     parser.add_argument(
-        "--max_new_tokens", type=int, default=4096,
-        help="Max tokens for model generation (default: 4096)",
+        "--max_new_tokens", type=int, default=32768,
+        help="Max tokens for model generation (default: 32768)",
     )
     parser.add_argument(
-        "--no_think", action="store_true",
-        help="Disable thinking mode (greedy output, no CoT reasoning chain).",
+        "--think", action="store_true",
+        help="Enable thinking mode (CoT reasoning chain). Uses more tokens "
+             "and may get stuck in reasoning loops on a 2B model.",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -1037,11 +1038,8 @@ Examples:
 
     args = parser.parse_args()
 
-    # Convert no_think flag to a positive 'think' variable
-    args.think = not args.no_think
-
     if args.think:
-        logger.info("Thinking mode enabled by default.")
+        logger.info("Thinking mode enabled — model will use CoT reasoning.")
 
     # Validate data file exists
     if not TRAIN_FILE.exists():
