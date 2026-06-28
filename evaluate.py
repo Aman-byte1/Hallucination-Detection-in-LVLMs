@@ -504,8 +504,15 @@ def load_model(model_id: str):
     return model, processor
 
 
-def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) -> str:
-    """Run hallucination detection inference on a single sample."""
+def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048,
+                  enable_thinking: bool = False) -> str:
+    """Run hallucination detection inference on a single sample.
+    
+    Args:
+        enable_thinking: If True, allows the model's <think> reasoning chain.
+            This requires more tokens (8192+) but may improve quality.
+            If False (default), the model outputs JSON directly.
+    """
     from PIL import Image
 
     # Find the image if it exists
@@ -540,9 +547,22 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) ->
         {"role": "user", "content": user_content},
     ]
 
-    text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    # Disable thinking mode so the model outputs JSON directly instead
+    # of consuming the entire token budget on <think> reasoning chains.
+    # Thinking can be re-enabled via --think flag if needed.
+    template_kwargs = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+    }
+    # Try to pass enable_thinking if the processor supports it
+    try:
+        text = processor.apply_chat_template(
+            messages, enable_thinking=enable_thinking, **template_kwargs
+        )
+    except TypeError:
+        text = processor.apply_chat_template(
+            messages, **template_kwargs
+        )
 
     try:
         from qwen_vl_utils import process_vision_info
@@ -571,20 +591,35 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) ->
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
+    # Use sampling for thinking mode, greedy for non-thinking
+    gen_kwargs = {"max_new_tokens": max_new_tokens}
+    if enable_thinking:
+        gen_kwargs.update({
+            "do_sample": True,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+        })
+    else:
+        gen_kwargs.update({
+            "do_sample": False,
+            "temperature": None,
+            "top_p": None,
+        })
+
     with torch.no_grad():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,         # Required for Qwen3 Thinking models
-            temperature=0.6,        # Recommended for thinking mode
-            top_p=0.95,
-            top_k=20,
-        )
+        output_ids = model.generate(**inputs, **gen_kwargs)
 
     # Decode only the generated tokens (not the prompt)
+    # Use skip_special_tokens=False to preserve <think> tags for proper parsing
     input_len = inputs["input_ids"].shape[1]
     generated_ids = output_ids[0][input_len:]
-    response = processor.decode(generated_ids, skip_special_tokens=True)
+    response = processor.decode(generated_ids, skip_special_tokens=False)
+
+    # Clean up known special tokens that aren't <think> tags
+    # (we handle <think> in the parser)
+    response = response.replace("<|im_end|>", "").replace("<|endoftext|>", "")
+    response = response.replace("<|im_start|>", "").strip()
 
     return response
 
@@ -663,13 +698,20 @@ def evaluate(args):
         sample = eval_samples[idx]
 
         try:
-            raw_output = run_inference(model, processor, sample,
-                                       max_new_tokens=args.max_new_tokens)
+            raw_output = run_inference(
+                model, processor, sample,
+                max_new_tokens=args.max_new_tokens,
+                enable_thinking=args.think,
+            )
             pred_labels = parse_model_output(raw_output, sample["response"])
-            # Log raw output (truncated) so we can debug what the model generates
+            # Log raw output — show head and tail to see if JSON is at the end
             clean_output = re.sub(r'<think>.*?</think>', '<think>...</think>', raw_output, flags=re.DOTALL)
-            clean_output = clean_output.strip()[:200]
-            tqdm.write(f"Sample {sample['id']} - {len(pred_labels)} spans | Raw: {clean_output!r}")
+            clean_output = clean_output.strip()
+            if len(clean_output) > 300:
+                display = clean_output[:150] + " ... " + clean_output[-150:]
+            else:
+                display = clean_output
+            tqdm.write(f"Sample {sample['id']} - {len(pred_labels)} spans | Output: {display!r}")
         except Exception as e:
             tqdm.write(f"Error on sample {sample['id']}: {e}")
             import traceback
@@ -988,11 +1030,21 @@ Examples:
         help="Max tokens for model generation (default: 2048)",
     )
     parser.add_argument(
+        "--think", action="store_true",
+        help="Enable thinking mode (uses more tokens but may improve quality). "
+             "Automatically increases max_new_tokens to 8192 if not explicitly set.",
+    )
+    parser.add_argument(
         "--resume", action="store_true",
         help="Resume from last checkpoint",
     )
 
     args = parser.parse_args()
+
+    # If thinking is enabled and max_new_tokens wasn't explicitly set, increase it
+    if args.think and args.max_new_tokens == 2048:
+        args.max_new_tokens = 8192
+        logger.info(f"Thinking mode enabled — increased max_new_tokens to {args.max_new_tokens}")
 
     # Validate data file exists
     if not TRAIN_FILE.exists():
