@@ -542,10 +542,10 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048,
             messages, **template_kwargs
         )
 
-    # Pre-fill the assistant response with '[' to force JSON array output.
-    # Without this, the model generates lengthy natural language analysis
-    # instead of structured JSON, consuming the entire token budget.
-    text += "["
+    # Only pre-fill the assistant response with '[' when thinking is disabled.
+    # When thinking is enabled, the model must start with '<think>' to reason.
+    if not enable_thinking:
+        text += "["
 
     try:
         from qwen_vl_utils import process_vision_info
@@ -608,9 +608,9 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048,
     response = response.replace("<|im_end|>", "").replace("<|endoftext|>", "")
     response = response.replace("<|im_start|>", "").strip()
 
-    # Prepend '[' since we pre-filled it in the prompt but it's not in
-    # the generated tokens (it was part of the input)
-    response = "[" + response
+    # Prepend '[' only if we pre-filled it (i.e. thinking was disabled)
+    if not enable_thinking:
+        response = "[" + response
 
     return response
 
@@ -1017,13 +1017,12 @@ Examples:
         help="Limit number of eval samples (for testing)",
     )
     parser.add_argument(
-        "--max_new_tokens", type=int, default=2048,
-        help="Max tokens for model generation (default: 2048)",
+        "--max_new_tokens", type=int, default=4096,
+        help="Max tokens for model generation (default: 4096)",
     )
     parser.add_argument(
-        "--think", action="store_true",
-        help="Enable thinking mode (uses more tokens but may improve quality). "
-             "Automatically increases max_new_tokens to 8192 if not explicitly set.",
+        "--no_think", action="store_true",
+        help="Disable thinking mode (greedy output, no CoT reasoning chain).",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -1032,10 +1031,11 @@ Examples:
 
     args = parser.parse_args()
 
-    # If thinking is enabled and max_new_tokens wasn't explicitly set, increase it
-    if args.think and args.max_new_tokens == 2048:
-        args.max_new_tokens = 8192
-        logger.info(f"Thinking mode enabled — increased max_new_tokens to {args.max_new_tokens}")
+    # Convert no_think flag to a positive 'think' variable
+    args.think = not args.no_think
+
+    if args.think:
+        logger.info("Thinking mode enabled by default.")
 
     # Validate data file exists
     if not TRAIN_FILE.exists():
