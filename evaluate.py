@@ -155,54 +155,32 @@ def split_eval_data(samples: list[dict], ratio: float = 0.10,
 # Prompt Construction & Output Parsing
 # ============================================================================
 
-SYSTEM_PROMPT = """You are an expert hallucination detector for vision-language model outputs.
+SYSTEM_PROMPT = """You detect hallucinations in image descriptions. Compare the image to the response and find errors.
 
-Your task: Given a question about an image and the model's response, identify all hallucinated spans in the response.
+Hallucination types:
+- invention: made-up facts not in the image
+- mischaracterization: wrong description (wrong color, wrong attribute)
+- OCR: wrong text reading
+- miscounting: wrong count
 
-A hallucination is any part of the response that:
-- **Invention**: Fabricates information (e.g., making up names, locations, facts not in the image).
-- **Mischaracterization**: Describes something inaccurately (e.g., wrong color, wrong attribute).
-- **OCR**: Incorrectly reads text visible in the image.
-- **Miscounting**: Gets counts wrong (e.g., says "four" when there are three).
+Output a JSON array. Each item: {"text": "exact wrong text", "label": "type", "prob": confidence}
+If no errors: []
 
-For each hallucinated span you find:
-1. `text`: Copy the EXACT hallucinated text from the response (this is the most important field)
-2. `label`: One of "invention", "mischaracterization", "OCR", "miscounting"
-3. `prob`: Your confidence that this span is hallucinated (0.0 to 1.0)
-
-CRITICAL RULES:
-- You MUST copy the exact text from the response. Do NOT paraphrase.
-- Respond ONLY with a valid JSON array.
-- If there are no hallucinations, respond with: []
-- Focus on factual errors that contradict what is actually in the image.
-- Even small errors count (a single wrong word like "four" instead of "three").
-
-Example:
-Question: "How many dogs are in the image?"
-Response: "There are three golden retrievers playing in the park near a red bench."
-If the image shows 2 dogs (not 3), one is a labrador (not golden retriever), and the bench is blue (not red):
-[{"text": "three", "label": "miscounting", "prob": 0.9}, {"text": "golden retrievers", "label": "mischaracterization", "prob": 0.8}, {"text": "red", "label": "mischaracterization", "prob": 0.85}]"""
+Example: [{"text": "red", "label": "mischaracterization", "prob": 0.9}]"""
 
 
 def build_user_prompt(sample: dict) -> str:
     """Build the user message for hallucination detection.
     
-    Kept simple and direct for a 2B model — avoids bloating context
-    with annotations that confuse small models.
+    Kept minimal for a 2B model to maximize token budget for the answer.
     """
     prompt = sample["prompt"]
     response = sample["response"]
-    image_name = sample.get("image_name", "unknown")
 
     return (
-        f"Image: {image_name}\n\n"
-        f"Question: {prompt}\n\n"
-        f"Response to check for hallucinations:\n"
-        f"```\n{response}\n```\n\n"
-        f"Look at the image carefully. Compare it to the response above. "
-        f"Find every claim in the response that does NOT match what you see in the image. "
-        f"For each error, copy the exact wrong text from the response.\n\n"
-        f"Output a JSON array. If the response is fully accurate, output: []"
+        f"Question: {prompt}\n"
+        f"Response: {response}\n\n"
+        f"List all hallucinated spans as JSON. Copy exact text from the response."
     )
 
 
@@ -564,6 +542,11 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048,
             messages, **template_kwargs
         )
 
+    # Pre-fill the assistant response with '[' to force JSON array output.
+    # Without this, the model generates lengthy natural language analysis
+    # instead of structured JSON, consuming the entire token budget.
+    text += "["
+
     try:
         from qwen_vl_utils import process_vision_info
         vision_outputs = process_vision_info(messages)
@@ -620,6 +603,10 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048,
     # (we handle <think> in the parser)
     response = response.replace("<|im_end|>", "").replace("<|endoftext|>", "")
     response = response.replace("<|im_start|>", "").strip()
+
+    # Prepend '[' since we pre-filled it in the prompt but it's not in
+    # the generated tokens (it was part of the input)
+    response = "[" + response
 
     return response
 
