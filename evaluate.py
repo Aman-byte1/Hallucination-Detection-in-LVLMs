@@ -152,35 +152,36 @@ def split_eval_data(samples: list[dict], ratio: float = 0.10,
 
 
 # ============================================================================
-SYSTEM_PROMPT = """You are a precise hallucination detection system. Your output must be ONLY a valid JSON array.
+SYSTEM_PROMPT = """You detect hallucinations in image descriptions. Look at the image carefully and compare it to the response.
 
-Guidelines:
-1. If the response contains no errors or hallucinations, output exactly: []
-2. If there are errors, output a JSON array of objects:
-   [{"text": "exact wrong text", "label": "type", "prob": confidence}]
-3. Never write any introductory text, analysis, reasoning, or explanations. Start your output directly with the JSON array.
+A hallucination is ONLY text that is factually WRONG based on what you see in the image:
+- invention: claims about things not visible in the image
+- mischaracterization: wrong color, shape, size, or attributes
+- OCR: incorrectly read text from the image
+- miscounting: wrong number of objects
 
-Types of hallucinations:
-- invention (made-up facts not in the image)
-- mischaracterization (incorrect description, color, attributes)
-- OCR (incorrect text reading)
-- miscounting (incorrect object counts)
+RULES:
+- Output ONLY a JSON array, no other text
+- If the response accurately describes the image, output exactly: []
+- Quote only the specific WRONG words or short phrase, NOT entire sentences
+- Only flag claims that clearly contradict what you see in the image
+- Do NOT flag opinions, greetings, or hedging language like "appears to" or "it seems"
 
-Example: [{"text": "red", "label": "mischaracterization", "prob": 0.9}]"""
+Example with errors: [{"text": "red", "label": "mischaracterization", "prob": 0.9}]
+Example without errors: []"""
 
 
 def build_user_prompt(sample: dict) -> str:
-    """Build the user message for hallucination detection.
-    
-    Kept minimal for a 2B model to maximize token budget for the answer.
-    """
+    """Build the user message for hallucination detection."""
     prompt = sample["prompt"]
     response = sample["response"]
 
     return (
         f"Question: {prompt}\n"
         f"Response: {response}\n\n"
-        f"Identify all hallucination spans. Output JSON array only."
+        f"Compare the image to the response. "
+        f"Flag ONLY specific words or phrases that are factually wrong. "
+        f"If the response is accurate, output []."
     )
 
 
