@@ -152,19 +152,19 @@ def split_eval_data(samples: list[dict], ratio: float = 0.10,
 
 
 # ============================================================================
-# Prompt Construction & Output Parsing
-# ============================================================================
+SYSTEM_PROMPT = """You are a precise hallucination detection system. Your output must be ONLY a valid JSON array.
 
-SYSTEM_PROMPT = """You detect hallucinations in image descriptions. Compare the image to the response and find errors.
+Guidelines:
+1. If the response contains no errors or hallucinations, output exactly: []
+2. If there are errors, output a JSON array of objects:
+   [{"text": "exact wrong text", "label": "type", "prob": confidence}]
+3. Never write any introductory text, analysis, reasoning, or explanations. Start your output directly with the JSON array.
 
-Hallucination types:
-- invention: made-up facts not in the image
-- mischaracterization: wrong description (wrong color, wrong attribute)
-- OCR: wrong text reading
-- miscounting: wrong count
-
-Output a JSON array. Each item: {"text": "exact wrong text", "label": "type", "prob": confidence}
-If no errors: []
+Types of hallucinations:
+- invention (made-up facts not in the image)
+- mischaracterization (incorrect description, color, attributes)
+- OCR (incorrect text reading)
+- miscounting (incorrect object counts)
 
 Example: [{"text": "red", "label": "mischaracterization", "prob": 0.9}]"""
 
@@ -180,7 +180,7 @@ def build_user_prompt(sample: dict) -> str:
     return (
         f"Question: {prompt}\n"
         f"Response: {response}\n\n"
-        f"List all hallucinated spans as JSON. Copy exact text from the response."
+        f"Identify all hallucination spans. Output JSON array only."
     )
 
 
@@ -558,10 +558,14 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048,
         logger.warning("qwen-vl-utils not installed. Attempting standard processor call.")
         image_inputs, video_inputs = None, None
 
-    kwargs = {
-        "text": [text],
+    processor_kwargs = {
         "padding": True,
         "return_tensors": "pt"
+    }
+
+    kwargs = {
+        "text": [text],
+        "processor_kwargs": processor_kwargs
     }
     if image_inputs is not None:
         kwargs["images"] = image_inputs
