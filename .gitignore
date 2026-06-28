@@ -35,10 +35,12 @@ huggingface_cache/
 # Data files (large - downloaded via setup.sh)
 shroom-visions-data/
 shroom-visions-images/
+shroom-vis-images/
 shroom-visions-data.zip
 shroom-visions-images.tar.gz
 *.zip
 *.tar.gz
+inspect_sample.py
 
 # Outputs (regeneratable)
 outputs/

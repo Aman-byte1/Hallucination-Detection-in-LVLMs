@@ -157,47 +157,73 @@ def split_eval_data(samples: list[dict], ratio: float = 0.10,
 
 SYSTEM_PROMPT = """You are an expert hallucination detector for vision-language model outputs.
 
-Your task: Given a user's question about an image and the model's response, identify all hallucinated spans in the response.
+Your task: Given a question about an image and the model's response, identify all hallucinated spans in the response.
 
-A hallucination is any part of the response that is:
-- **Invention**: Information fabricated without any basis (e.g., making up a species name, location, or fact).
-- **Mischaracterization**: Describing something that exists but inaccurately (e.g., wrong color, wrong count, wrong attribute).
-- **OCR Problem**: Incorrect reading of text visible in an image.
-- **Miscounting**: Incorrect count of objects or items.
+A hallucination is any part of the response that:
+- **Invention**: Fabricates information (e.g., making up names, locations, facts not in the image).
+- **Mischaracterization**: Describes something inaccurately (e.g., wrong color, wrong attribute).
+- **OCR**: Incorrectly reads text visible in the image.
+- **Miscounting**: Gets counts wrong (e.g., says "four" when there are three).
 
-For each hallucinated span, provide:
-1. `start`: Character index where the hallucinated span begins (0-indexed)
-2. `end`: Character index where the hallucinated span ends (exclusive)
-3. `label`: One of "invention", "mischaracterization", "OCR", "miscounting"
-4. `prob`: Your confidence that this span is hallucinated (0.0 to 1.0)
+For each hallucinated span you find:
+1. `text`: Copy the EXACT hallucinated text from the response (this is the most important field)
+2. `label`: One of "invention", "mischaracterization", "OCR", "miscounting"
+3. `prob`: Your confidence that this span is hallucinated (0.0 to 1.0)
 
-CRITICAL: Respond ONLY with a valid JSON array. If there are no hallucinations, respond with an empty array: []
+CRITICAL RULES:
+- You MUST copy the exact text from the response. Do NOT paraphrase.
+- Respond ONLY with a valid JSON array.
+- If there are no hallucinations, respond with: []
+- Focus on factual errors that contradict what is actually in the image.
+- Even small errors count (a single wrong word like "four" instead of "three").
 
-Example output:
-[{"start": 45, "end": 78, "label": "invention", "prob": 0.85}, {"start": 120, "end": 135, "label": "mischaracterization", "prob": 0.6}]"""
+Example:
+Question: "How many dogs are in the image?"
+Response: "There are three golden retrievers playing in the park near a red bench."
+If the image shows 2 dogs (not 3), one is a labrador (not golden retriever), and the bench is blue (not red):
+[{"text": "three", "label": "miscounting", "prob": 0.9}, {"text": "golden retrievers", "label": "mischaracterization", "prob": 0.8}, {"text": "red", "label": "mischaracterization", "prob": 0.85}]"""
 
 
 def build_user_prompt(sample: dict) -> str:
-    """Build the user message for hallucination detection."""
+    """Build the user message for hallucination detection.
+    
+    Uses word-level annotation to help the model precisely locate text
+    in the response, making it much easier to quote exact spans.
+    """
     prompt = sample["prompt"]
     response = sample["response"]
     image_name = sample.get("image_name", "unknown")
 
+    # Create a word-annotated version of the response to help the model
+    # Each word is shown with its character position range
+    annotated_words = []
+    i = 0
+    for word in response.split():
+        # Find the actual position of this word in the response
+        pos = response.find(word, i)
+        if pos >= 0:
+            annotated_words.append(f"[{pos}-{pos+len(word)}]\"{word}\"")
+            i = pos + len(word)
+    annotated_response = " ".join(annotated_words)
+
     return (
         f"Image filename: {image_name}\n\n"
         f"User's question about the image:\n{prompt}\n\n"
-        f"Model's response (analyze this for hallucinations):\n{response}\n\n"
-        f"The response has {len(response)} characters (0-indexed from 0 to "
-        f"{len(response) - 1}).\n\n"
-        f"Identify ALL hallucinated spans as a JSON array. "
-        f"Be precise with character indices. If no hallucination, return []."
+        f"Model's response to analyze:\n"
+        f"---\n{response}\n---\n\n"
+        f"Word positions for reference:\n{annotated_response}\n\n"
+        f"Find ALL hallucinated spans. For each one, copy the EXACT text from the response. "
+        f"Output a JSON array. If no hallucinations, output: []"
     )
 
 
-def parse_model_output(output_text: str) -> list[dict]:
+def parse_model_output(output_text: str, response_text: str = "") -> list[dict]:
     """Parse the model's JSON output into a list of label dicts.
 
     Handles common formatting issues: thinking tags, markdown code blocks, etc.
+    The new prompt format returns 'text' fields instead of start/end indices,
+    so we compute character positions from quoted text matches against the
+    original response.
     """
     import ast
     text = output_text.strip()
@@ -211,55 +237,161 @@ def parse_model_output(output_text: str) -> list[dict]:
     text = re.sub(r"```\s*", "", text)
     text = text.strip()
 
+    parsed = None
+
     # Try to find a JSON array in the text
     # Look for the outermost [...] pattern
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if match:
         json_str = match.group(0)
-        
+
         # 1. Try standard json parsing
         try:
-            parsed = json.loads(json_str)
-            if isinstance(parsed, list):
-                return clean_labels(parsed)
+            result = json.loads(json_str)
+            if isinstance(result, list):
+                parsed = result
         except json.JSONDecodeError:
             pass
 
         # 2. Try ast.literal_eval for single quotes/python-like lists
-        try:
-            parsed = ast.literal_eval(json_str)
-            if isinstance(parsed, list):
-                return clean_labels(parsed)
-        except (ValueError, SyntaxError):
-            pass
+        if parsed is None:
+            try:
+                result = ast.literal_eval(json_str)
+                if isinstance(result, list):
+                    parsed = result
+            except (ValueError, SyntaxError):
+                pass
 
         # 3. Try replacing single quotes with double quotes
-        try:
-            fixed_str = json_str.replace("'", '"')
-            parsed = json.loads(fixed_str)
-            if isinstance(parsed, list):
-                return clean_labels(parsed)
-        except json.JSONDecodeError:
-            pass
-
-    # If no valid JSON found, return empty
-    return []
-
-
-def clean_labels(parsed_list: list) -> list[dict]:
-    """Validate and normalize labels list."""
-    cleaned = []
-    for item in parsed_list:
-        if isinstance(item, dict) and "start" in item and "end" in item:
+        if parsed is None:
             try:
-                cleaned.append({
-                    "start": int(item["start"]),
-                    "end": int(item["end"]),
-                    "label": str(item.get("label", "invention")),
-                    "prob": float(item.get("prob", item.get("confidence", 0.5))),
-                })
+                fixed_str = json_str.replace("'", '"')
+                result = json.loads(fixed_str)
+                if isinstance(result, list):
+                    parsed = result
+            except json.JSONDecodeError:
+                pass
+
+    if parsed is None:
+        # 4. Try to extract individual JSON objects even without array brackets
+        obj_matches = re.findall(r'\{[^{}]+\}', text)
+        if obj_matches:
+            parsed = []
+            for obj_str in obj_matches:
+                try:
+                    obj = json.loads(obj_str)
+                    if isinstance(obj, dict):
+                        parsed.append(obj)
+                except json.JSONDecodeError:
+                    try:
+                        obj = json.loads(obj_str.replace("'", '"'))
+                        if isinstance(obj, dict):
+                            parsed.append(obj)
+                    except json.JSONDecodeError:
+                        pass
+
+    if parsed is None:
+        return []
+
+    return resolve_labels(parsed, response_text)
+
+
+def resolve_labels(parsed_list: list, response_text: str) -> list[dict]:
+    """Convert parsed model output to normalized labels with character indices.
+
+    Handles two formats:
+    1. New format: {"text": "...", "label": "...", "prob": ...}
+       -> We locate 'text' in response_text to compute start/end.
+    2. Legacy format: {"start": N, "end": M, "label": "...", "prob": ...}
+       -> Used directly.
+    """
+    cleaned = []
+    used_positions = set()  # Track used match positions to avoid duplicates
+
+    for item in parsed_list:
+        if not isinstance(item, dict):
+            continue
+
+        label = str(item.get("label", "invention"))
+        prob = 0.5
+        try:
+            prob = float(item.get("prob", item.get("confidence", 0.5)))
+        except (ValueError, TypeError):
+            pass
+        prob = max(0.0, min(1.0, prob))
+
+        # Case 1: Has 'text' field — resolve to start/end from response
+        if "text" in item and response_text:
+            span_text = str(item["text"])
+            if not span_text:
+                continue
+
+            # Find all occurrences of this text in the response
+            search_start = 0
+            found = False
+            while search_start < len(response_text):
+                pos = response_text.find(span_text, search_start)
+                if pos == -1:
+                    break
+                end_pos = pos + len(span_text)
+                # Use this occurrence only if not already claimed
+                pos_key = (pos, end_pos)
+                if pos_key not in used_positions:
+                    used_positions.add(pos_key)
+                    cleaned.append({
+                        "start": pos,
+                        "end": end_pos,
+                        "label": label,
+                        "prob": prob,
+                    })
+                    found = True
+                    break
+                search_start = pos + 1
+
+            # Fuzzy fallback: try case-insensitive match
+            if not found:
+                response_lower = response_text.lower()
+                span_lower = span_text.lower()
+                search_start = 0
+                while search_start < len(response_lower):
+                    pos = response_lower.find(span_lower, search_start)
+                    if pos == -1:
+                        break
+                    end_pos = pos + len(span_text)
+                    pos_key = (pos, end_pos)
+                    if pos_key not in used_positions:
+                        used_positions.add(pos_key)
+                        cleaned.append({
+                            "start": pos,
+                            "end": end_pos,
+                            "label": label,
+                            "prob": prob,
+                        })
+                        found = True
+                        break
+                    search_start = pos + 1
+
+            if not found:
+                logger.debug(
+                    f"Could not locate span text in response: "
+                    f"{span_text!r:.60}"
+                )
+
+        # Case 2: Has 'start' and 'end' — legacy format
+        elif "start" in item and "end" in item:
+            try:
+                start = int(item["start"])
+                end = int(item["end"])
+                if 0 <= start < end:
+                    cleaned.append({
+                        "start": start,
+                        "end": end,
+                        "label": label,
+                        "prob": prob,
+                    })
             except (ValueError, TypeError):
                 pass
+
     return cleaned
 
 
@@ -543,7 +675,7 @@ def evaluate(args):
         try:
             raw_output = run_inference(model, processor, sample,
                                        max_new_tokens=args.max_new_tokens)
-            pred_labels = parse_model_output(raw_output)
+            pred_labels = parse_model_output(raw_output, sample["response"])
             tqdm.write(f"Sample {sample['id']} - Predicted {len(pred_labels)} spans")
         except Exception as e:
             tqdm.write(f"Error on sample {sample['id']}: {e}")
