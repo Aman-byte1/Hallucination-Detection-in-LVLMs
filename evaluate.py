@@ -263,6 +263,52 @@ def parse_model_output(output_text: str, response_text: str = "") -> list[dict]:
     return resolve_labels(parsed, response_text)
 
 
+def clean_and_align(text: str) -> tuple[str, list[int]]:
+    """Clean markdown formatting characters and track index alignment."""
+    clean_chars = []
+    idx_map = []
+    for i, c in enumerate(text):
+        if c in ['*', '_', '`']:
+            continue
+        clean_chars.append(c)
+        idx_map.append(i)
+    return "".join(clean_chars), idx_map
+
+
+def find_robust_span(span_text: str, response_text: str, used_positions: set) -> tuple[int, int] | None:
+    """Find a span's start/end index in original response text, ignoring markdown."""
+    clean_resp, idx_map = clean_and_align(response_text)
+    clean_span, _ = clean_and_align(span_text)
+
+    # Split span into words to allow variable/flexible spacing/whitespace
+    words = clean_span.lower().split()
+    if not words:
+        return None
+    pattern = r"\s+".join(re.escape(w) for w in words)
+
+    # Search in cleaned response text
+    search_start = 0
+    while search_start < len(clean_resp):
+        match = re.search(pattern, clean_resp.lower()[search_start:])
+        if not match:
+            break
+
+        start_clean = search_start + match.start()
+        end_clean = search_start + match.end() - 1
+
+        # Map back to original indices
+        orig_start = idx_map[start_clean]
+        orig_end = idx_map[end_clean] + 1
+
+        pos_key = (orig_start, orig_end)
+        if pos_key not in used_positions:
+            return pos_key
+
+        search_start = start_clean + 1
+
+    return None
+
+
 def resolve_labels(parsed_list: list, response_text: str) -> list[dict]:
     """Convert parsed model output to normalized labels with character indices.
 
@@ -293,52 +339,16 @@ def resolve_labels(parsed_list: list, response_text: str) -> list[dict]:
             if not span_text:
                 continue
 
-            # Find all occurrences of this text in the response
-            search_start = 0
-            found = False
-            while search_start < len(response_text):
-                pos = response_text.find(span_text, search_start)
-                if pos == -1:
-                    break
-                end_pos = pos + len(span_text)
-                # Use this occurrence only if not already claimed
-                pos_key = (pos, end_pos)
-                if pos_key not in used_positions:
-                    used_positions.add(pos_key)
-                    cleaned.append({
-                        "start": pos,
-                        "end": end_pos,
-                        "label": label,
-                        "prob": prob,
-                    })
-                    found = True
-                    break
-                search_start = pos + 1
-
-            # Fuzzy fallback: try case-insensitive match
-            if not found:
-                response_lower = response_text.lower()
-                span_lower = span_text.lower()
-                search_start = 0
-                while search_start < len(response_lower):
-                    pos = response_lower.find(span_lower, search_start)
-                    if pos == -1:
-                        break
-                    end_pos = pos + len(span_text)
-                    pos_key = (pos, end_pos)
-                    if pos_key not in used_positions:
-                        used_positions.add(pos_key)
-                        cleaned.append({
-                            "start": pos,
-                            "end": end_pos,
-                            "label": label,
-                            "prob": prob,
-                        })
-                        found = True
-                        break
-                    search_start = pos + 1
-
-            if not found:
+            pos_key = find_robust_span(span_text, response_text, used_positions)
+            if pos_key is not None:
+                used_positions.add(pos_key)
+                cleaned.append({
+                    "start": pos_key[0],
+                    "end": pos_key[1],
+                    "label": label,
+                    "prob": prob,
+                })
+            else:
                 logger.debug(
                     f"Could not locate span text in response: "
                     f"{span_text!r:.60}"
