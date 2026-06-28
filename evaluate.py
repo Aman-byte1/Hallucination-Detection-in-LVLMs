@@ -558,14 +558,10 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048,
         logger.warning("qwen-vl-utils not installed. Attempting standard processor call.")
         image_inputs, video_inputs = None, None
 
-    processor_kwargs = {
-        "padding": True,
-        "return_tensors": "pt"
-    }
-
     kwargs = {
         "text": [text],
-        "processor_kwargs": processor_kwargs
+        "padding": True,
+        "return_tensors": "pt"
     }
     if image_inputs is not None:
         kwargs["images"] = image_inputs
