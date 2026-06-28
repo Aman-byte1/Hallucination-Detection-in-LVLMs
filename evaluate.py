@@ -187,33 +187,22 @@ If the image shows 2 dogs (not 3), one is a labrador (not golden retriever), and
 def build_user_prompt(sample: dict) -> str:
     """Build the user message for hallucination detection.
     
-    Uses word-level annotation to help the model precisely locate text
-    in the response, making it much easier to quote exact spans.
+    Kept simple and direct for a 2B model — avoids bloating context
+    with annotations that confuse small models.
     """
     prompt = sample["prompt"]
     response = sample["response"]
     image_name = sample.get("image_name", "unknown")
 
-    # Create a word-annotated version of the response to help the model
-    # Each word is shown with its character position range
-    annotated_words = []
-    i = 0
-    for word in response.split():
-        # Find the actual position of this word in the response
-        pos = response.find(word, i)
-        if pos >= 0:
-            annotated_words.append(f"[{pos}-{pos+len(word)}]\"{word}\"")
-            i = pos + len(word)
-    annotated_response = " ".join(annotated_words)
-
     return (
-        f"Image filename: {image_name}\n\n"
-        f"User's question about the image:\n{prompt}\n\n"
-        f"Model's response to analyze:\n"
-        f"---\n{response}\n---\n\n"
-        f"Word positions for reference:\n{annotated_response}\n\n"
-        f"Find ALL hallucinated spans. For each one, copy the EXACT text from the response. "
-        f"Output a JSON array. If no hallucinations, output: []"
+        f"Image: {image_name}\n\n"
+        f"Question: {prompt}\n\n"
+        f"Response to check for hallucinations:\n"
+        f"```\n{response}\n```\n\n"
+        f"Look at the image carefully. Compare it to the response above. "
+        f"Find every claim in the response that does NOT match what you see in the image. "
+        f"For each error, copy the exact wrong text from the response.\n\n"
+        f"Output a JSON array. If the response is fully accurate, output: []"
     )
 
 
@@ -586,9 +575,10 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) ->
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=False,        # Greedy for reproducibility
-            temperature=None,
-            top_p=None,
+            do_sample=True,         # Required for Qwen3 Thinking models
+            temperature=0.6,        # Recommended for thinking mode
+            top_p=0.95,
+            top_k=20,
         )
 
     # Decode only the generated tokens (not the prompt)
@@ -676,9 +666,14 @@ def evaluate(args):
             raw_output = run_inference(model, processor, sample,
                                        max_new_tokens=args.max_new_tokens)
             pred_labels = parse_model_output(raw_output, sample["response"])
-            tqdm.write(f"Sample {sample['id']} - Predicted {len(pred_labels)} spans")
+            # Log raw output (truncated) so we can debug what the model generates
+            clean_output = re.sub(r'<think>.*?</think>', '<think>...</think>', raw_output, flags=re.DOTALL)
+            clean_output = clean_output.strip()[:200]
+            tqdm.write(f"Sample {sample['id']} - {len(pred_labels)} spans | Raw: {clean_output!r}")
         except Exception as e:
             tqdm.write(f"Error on sample {sample['id']}: {e}")
+            import traceback
+            traceback.print_exc()
             raw_output = ""
             pred_labels = []
 
