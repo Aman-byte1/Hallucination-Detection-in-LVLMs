@@ -2,7 +2,7 @@
 """
 SHROOM-Visions Hallucination Detection Evaluation
 ===================================================
-Single-script evaluation pipeline using Qwen3-VL-2B-Thinking model.
+Single-script evaluation pipeline using Qwen2.5-VL-2B-Instruct model.
 
 Evaluates hallucination span detection on a held-out 10% of the English
 training data, computes IoU (span identification) and Pearson correlation
@@ -36,7 +36,7 @@ from tqdm import tqdm
 # Configuration
 # ============================================================================
 
-DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-2B-Thinking"
+DEFAULT_MODEL_ID = "Qwen/Qwen2.5-VL-2B-Instruct"
 DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
 IMAGES_DIR = Path(__file__).parent / "shroom-vis-images"
 OUTPUT_DIR = Path(__file__).parent / "outputs"
@@ -160,12 +160,14 @@ A hallucination is ONLY text that is factually WRONG based on what you see in th
 - OCR: incorrectly read text from the image
 - miscounting: wrong number of objects
 
-RULES:
-- Output ONLY a JSON array, no other text
-- If the response accurately describes the image, output exactly: []
+CRITICAL RULES:
+- After your reasoning, you MUST output the FINAL answer as a JSON array on its own line
+- If you found hallucinations, output them: [{"text": "wrong phrase", "label": "mischaracterization", "prob": 0.9}]
+- If the response is accurate, output exactly: []
 - Quote only the specific WRONG words or short phrase, NOT entire sentences
 - Only flag claims that clearly contradict what you see in the image
 - Do NOT flag opinions, greetings, or hedging language like "appears to" or "it seems"
+- NEVER output [] if you identified hallucination spans in your analysis above
 
 Example with errors: [{"text": "red", "label": "mischaracterization", "prob": 0.9}]
 Example without errors: []"""
@@ -195,18 +197,6 @@ def parse_model_output(output_text: str, response_text: str = "") -> list[dict]:
     """
     import ast
     text = output_text.strip()
-
-    # Robustly strip thinking/reasoning blocks
-    # Since the starting <think> tag may have been part of the prompt,
-    # we split on the closing tag to grab only the final response.
-    if "</think>" in text:
-        text = text.split("</think>", 1)[1]
-    elif "<|/think|>" in text:
-        text = text.split("<|/think|>", 1)[1]
-    else:
-        # Fallback to standard regex
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        text = re.sub(r"<\|think\|>.*?<\|/think\|>", "", text, flags=re.DOTALL)
 
     # Remove markdown code block wrappers
     text = re.sub(r"```json\s*", "", text)
@@ -416,8 +406,8 @@ def find_image(image_name: str, base_dir: Path) -> Path | None:
 
 
 def load_model(model_id: str):
-    """Load the Qwen3-VL model and processor."""
-    from transformers import AutoProcessor
+    """Load a Qwen VL model and processor."""
+    from transformers import AutoProcessor, AutoModelForImageTextToText
 
     logger.info(f"Loading model: {model_id}")
     logger.info(f"CUDA available: {torch.cuda.is_available()}")
@@ -438,81 +428,25 @@ def load_model(model_id: str):
 
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
 
-    model = None
-    # 1. Try Qwen3VLForConditionalGeneration directly (best class for Qwen3-VL)
-    try:
-        from transformers import Qwen3VLForConditionalGeneration
-        logger.info("Attempting to load model with Qwen3VLForConditionalGeneration...")
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_id,
-            torch_dtype=dtype,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-    except Exception as e:
-        logger.info(f"Failed to load with Qwen3VLForConditionalGeneration: {e}")
-
-    # 2. Try AutoModelForImageTextToText (new standard auto class in transformers 5.x)
-    if model is None:
-        try:
-            from transformers import AutoModelForImageTextToText
-            logger.info("Attempting to load model with AutoModelForImageTextToText...")
-            model = AutoModelForImageTextToText.from_pretrained(
-                model_id,
-                torch_dtype=dtype,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-        except Exception as e:
-            logger.info(f"Failed to load with AutoModelForImageTextToText: {e}")
-
-    # 3. Try AutoModelForVision2Seq (classic vision-to-seq auto class)
-    if model is None:
-        try:
-            from transformers import AutoModelForVision2Seq
-            logger.info("Attempting to load model with AutoModelForVision2Seq...")
-            model = AutoModelForVision2Seq.from_pretrained(
-                model_id,
-                torch_dtype=dtype,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-        except Exception as e:
-            logger.info(f"Failed to load with AutoModelForVision2Seq: {e}")
-
-    # 4. Fallback to AutoModelForCausalLM
-    if model is None:
-        try:
-            from transformers import AutoModelForCausalLM
-            logger.info("Attempting to load model with AutoModelForCausalLM...")
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                torch_dtype=dtype,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-        except Exception as e:
-            logger.info(f"Failed to load with AutoModelForCausalLM: {e}")
-            raise RuntimeError(f"Could not load model {model_id} with any AutoModel classes.")
-        
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_id,
+        torch_dtype=dtype,
+        device_map="auto",
+        trust_remote_code=True,
+    )
     model.eval()
 
     logger.info("Model loaded successfully")
     return model, processor
 
 
-def run_inference(model, processor, sample: dict, max_new_tokens: int = 4096,
-                  enable_thinking: bool = True) -> str:
+def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) -> str:
     """Run hallucination detection inference on a single sample.
-    
-    Args:
-        enable_thinking: If True, allows the model's <think> reasoning chain.
-            This requires more tokens (8192+) but may improve quality.
-            If False (default), the model outputs JSON directly.
+
+    Uses greedy decoding with the instruct model to produce JSON directly.
     """
     from PIL import Image
 
-    # Find the image if it exists
     image_name = sample.get("image_name", "")
     image_path = None
     if image_name:
@@ -522,19 +456,15 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 4096,
     if image_path is not None:
         try:
             image = Image.open(image_path).convert("RGB")
-            logger.debug(f"Loaded PIL Image object for: {image_name} from {image_path}")
         except Exception as e:
-            logger.warning(f"Error opening image {image_path} for {image_name}: {e}. Falling back to text-only.")
+            logger.warning(f"Error opening image {image_path}: {e}")
 
-    # Build the messages according to whether image is available
     if image is not None:
         user_content = [
             {"type": "image", "image": image},
             {"type": "text", "text": build_user_prompt(sample)},
         ]
     else:
-        if image_name:
-            logger.debug(f"Image {image_name} not found or failed to load. Running in text-only mode.")
         user_content = [
             {"type": "text", "text": build_user_prompt(sample)},
         ]
@@ -544,27 +474,9 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 4096,
         {"role": "user", "content": user_content},
     ]
 
-    # Disable thinking mode so the model outputs JSON directly instead
-    # of consuming the entire token budget on <think> reasoning chains.
-    # Thinking can be re-enabled via --think flag if needed.
-    template_kwargs = {
-        "tokenize": False,
-        "add_generation_prompt": True,
-    }
-    # Try to pass enable_thinking if the processor supports it
-    try:
-        text = processor.apply_chat_template(
-            messages, enable_thinking=enable_thinking, **template_kwargs
-        )
-    except TypeError:
-        text = processor.apply_chat_template(
-            messages, **template_kwargs
-        )
-
-    # Only pre-fill the assistant response with '[' when thinking is disabled.
-    # When thinking is enabled, the model must start with '<think>' to reason.
-    if not enable_thinking:
-        text += "["
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
     try:
         from qwen_vl_utils import process_vision_info
@@ -574,7 +486,6 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 4096,
         else:
             image_inputs, video_inputs = vision_outputs
     except ImportError:
-        logger.warning("qwen-vl-utils not installed. Attempting standard processor call.")
         image_inputs, video_inputs = None, None
 
     kwargs = {
@@ -589,45 +500,21 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 4096,
 
     inputs = processor(**kwargs)
 
-    # Move to model device
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    # Use sampling for thinking mode, greedy for non-thinking
-    gen_kwargs = {"max_new_tokens": max_new_tokens}
-    if enable_thinking:
-        gen_kwargs.update({
-            "do_sample": True,
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "top_k": 20,
-        })
-    else:
-        gen_kwargs.update({
-            "do_sample": False,
-            "temperature": None,
-            "top_p": None,
-        })
+    gen_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": False,
+    }
 
     with torch.no_grad():
         output_ids = model.generate(**inputs, **gen_kwargs)
 
-    # Decode only the generated tokens (not the prompt)
-    # Use skip_special_tokens=False to preserve <think> tags for proper parsing
     input_len = inputs["input_ids"].shape[1]
     generated_ids = output_ids[0][input_len:]
-    response = processor.decode(generated_ids, skip_special_tokens=False)
-
-    # Clean up known special tokens that aren't <think> tags
-    # (we handle <think> in the parser)
-    response = response.replace("<|im_end|>", "").replace("<|endoftext|>", "")
-    response = response.replace("<|im_start|>", "").strip()
-
-    # Prepend '[' only if we pre-filled it (i.e. thinking was disabled)
-    if not enable_thinking:
-        response = "[" + response
-
-    return response
+    response = processor.decode(generated_ids, skip_special_tokens=True)
+    return response.strip()
 
 
 # ============================================================================
@@ -707,11 +594,10 @@ def evaluate(args):
             raw_output = run_inference(
                 model, processor, sample,
                 max_new_tokens=args.max_new_tokens,
-                enable_thinking=args.think,
             )
             pred_labels = parse_model_output(raw_output, sample["response"])
             # Log raw output — show head and tail to see if JSON is at the end
-            clean_output = re.sub(r'<think>.*?</think>', '<think>...</think>', raw_output, flags=re.DOTALL)
+            clean_output = raw_output
             clean_output = clean_output.strip()
             if len(clean_output) > 300:
                 display = clean_output[:150] + " ... " + clean_output[-150:]
@@ -1020,7 +906,7 @@ Examples:
   python evaluate.py                            # Full evaluation
   python evaluate.py --max_samples 10           # Quick test (10 samples)
   python evaluate.py --resume                   # Resume from checkpoint
-  python evaluate.py --model_id Qwen/Qwen3-VL-2B-Thinking
+  python evaluate.py --model_id Qwen/Qwen2.5-VL-2B-Instruct
         """,
     )
     parser.add_argument(
@@ -1032,12 +918,8 @@ Examples:
         help="Max number of samples to evaluate (default: all)",
     )
     parser.add_argument(
-        "--max_new_tokens", type=int, default=4096,
-        help="Max tokens for model generation (default: 4096)",
-    )
-    parser.add_argument(
-        "--no_think", action="store_true",
-        help="Disable thinking mode (greedy output, no CoT reasoning chain).",
+        "--max_new_tokens", type=int, default=2048,
+        help="Max tokens for model generation (default: 2048)",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -1045,12 +927,6 @@ Examples:
     )
 
     args = parser.parse_args()
-
-    # Convert no_think flag to positive think variable
-    args.think = not args.no_think
-
-    if args.think:
-        logger.info("Thinking mode enabled — model will use CoT reasoning.")
 
     # Validate data file exists
     if not TRAIN_FILE.exists():
