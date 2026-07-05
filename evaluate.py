@@ -470,11 +470,9 @@ def _extract_labels_from_thinking(thinking_text, response_text):
     return []
 
 
-LG = chr(60)  # <
-RG = chr(62)  # >
-TAG_OPEN = LG + "think" + RG
-TAG_CLOSE = LG + "/think" + RG
-THINK_FILL = LG + "think" + RG + LG + "/think" + RG
+# Special token cleanup patterns (built from char codes to avoid source-level issues)
+_IM_START = chr(60) + "|im_start|" + chr(62)
+_IM_END = chr(60) + "|im_end|" + chr(62)
 
 
 def run_inference(model, processor, sample: dict, max_new_tokens: int = 16384,
@@ -552,8 +550,8 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 16384,
     input_len = inputs["input_ids"].shape[1]
     generated_ids = output_ids[0][input_len:]
     response = processor.decode(generated_ids, skip_special_tokens=False)
-    for tag in [TAG_CLOSE, TAG_OPEN, THINK_FILL]:
-        response = response.replace(tag, "")
+    # Clean extra special tokens - but NOT thinking tags (parse_model_output needs them)
+    response = response.replace(_IM_START, "").replace(_IM_END, "")
     response = response.replace("\n", " ").strip()
     return response
 
