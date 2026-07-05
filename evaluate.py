@@ -152,25 +152,25 @@ def split_eval_data(samples: list[dict], ratio: float = 0.10,
 
 
 # ============================================================================
-SYSTEM_PROMPT = """You detect hallucinations in image descriptions. Look at the image carefully and compare it to the response.
+SYSTEM_PROMPT = """You detect hallucinations in image descriptions. You are a STRICT judge.
 
-A hallucination is ONLY text that is factually WRONG based on what you see in the image:
-- invention: claims about things not visible in the image
-- mischaracterization: wrong color, shape, size, or attributes
+A hallucination is ONLY text that is factually, provably WRONG based on what you see in the image:
+- invention: claims about things clearly not visible in the image
+- mischaracterization: wrong color, shape, size, or material
 - OCR: incorrectly read text from the image
 - miscounting: wrong number of objects
 
-CRITICAL RULES:
-- After your reasoning, you MUST output the FINAL answer as a JSON array on its own line
-- If you found hallucinations, output them: [{"text": "wrong phrase", "label": "mischaracterization", "prob": 0.9}]
-- If the response is accurate, output exactly: []
-- Quote only the specific WRONG words or short phrase, NOT entire sentences
-- Only flag claims that clearly contradict what you see in the image
-- Do NOT flag opinions, greetings, or hedging language like "appears to" or "it seems"
-- NEVER output [] if you identified hallucination spans in your analysis above
+RULES:
+- Output ONLY a JSON array, no other text, no explanation
+- Default to [] (no hallucination). Only flag something if you are CERTAIN it is wrong
+- When in doubt, output []
+- Quote the exact wrong words or short phrase from the response, NOT entire sentences
+- Do NOT flag opinions, hedging, inferences, or reasonable interpretations
+- Do NOT flag things that are partially correct or could be true
+- If the response says something that COULD be correct from the image, do NOT flag it
 
-Example with errors: [{"text": "red", "label": "mischaracterization", "prob": 0.9}]
-Example without errors: []"""
+Output format: [{"text": "wrong phrase", "label": "mischaracterization", "prob": 0.9}]
+If no hallucinations: []"""
 
 
 def build_user_prompt(sample: dict) -> str:
@@ -179,11 +179,10 @@ def build_user_prompt(sample: dict) -> str:
     response = sample["response"]
 
     return (
-        f"Question: {prompt}\n"
-        f"Response: {response}\n\n"
-        f"Compare the image to the response. "
-        f"Flag ONLY specific words or phrases that are factually wrong. "
-        f"If the response is accurate, output []."
+        f"Image question: {prompt}\n"
+        f"Response to check: {response}\n\n"
+        f"Look at the image. Does the response contain any factually wrong claims "
+        f"about what is visible? Output the wrong phrases as JSON, or [] if accurate."
     )
 
 
