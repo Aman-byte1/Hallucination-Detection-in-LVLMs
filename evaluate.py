@@ -36,7 +36,7 @@ from tqdm import tqdm
 # Configuration
 # ============================================================================
 
-DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-2B-Thinking"
+DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-8B-Thinking"
 DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
 IMAGES_DIR = Path(__file__).parent / "shroom-vis-images"
 OUTPUT_DIR = Path(__file__).parent / "outputs"
