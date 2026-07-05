@@ -36,7 +36,7 @@ from tqdm import tqdm
 # Configuration
 # ============================================================================
 
-DEFAULT_MODEL_ID = "Qwen/Qwen2.5-VL-2B-Instruct"
+DEFAULT_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
 IMAGES_DIR = Path(__file__).parent / "shroom-vis-images"
 OUTPUT_DIR = Path(__file__).parent / "outputs"
@@ -906,7 +906,7 @@ Examples:
   python evaluate.py                            # Full evaluation
   python evaluate.py --max_samples 10           # Quick test (10 samples)
   python evaluate.py --resume                   # Resume from checkpoint
-  python evaluate.py --model_id Qwen/Qwen2.5-VL-2B-Instruct
+  python evaluate.py --model_id Qwen/Qwen2-VL-2B-Instruct
         """,
     )
     parser.add_argument(
