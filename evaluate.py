@@ -152,25 +152,27 @@ def split_eval_data(samples: list[dict], ratio: float = 0.10,
 
 
 # ============================================================================
-SYSTEM_PROMPT = """You detect hallucinations in image descriptions. You are a STRICT judge.
+SYSTEM_PROMPT = """You are a hallucination detector for image descriptions.
 
-A hallucination is ONLY text that is factually, provably WRONG based on what you see in the image:
-- invention: claims about things clearly not visible in the image
+Task: Given an image and a response about it, find text that is factually WRONG.
+A hallucination is ONLY:
+- invention: something not in the image at all
 - mischaracterization: wrong color, shape, size, or material
-- OCR: incorrectly read text from the image
-- miscounting: wrong number of objects
+- OCR: incorrectly read text
+- miscounting: wrong count of objects
 
-RULES:
-- Output ONLY a JSON array, no other text, no explanation
-- Default to [] (no hallucination). Only flag something if you are CERTAIN it is wrong
-- When in doubt, output []
-- Quote the exact wrong words or short phrase from the response, NOT entire sentences
-- Do NOT flag opinions, hedging, inferences, or reasonable interpretations
-- Do NOT flag things that are partially correct or could be true
-- If the response says something that COULD be correct from the image, do NOT flag it
+STRICT RULES:
+- Output ONLY a JSON array. Nothing else.
+- Be CONSERVATIVE. If unsure, output []
+- Do NOT flag opinions, hedging, or reasonable interpretations
+- Do NOT flag things that could be correct
+- Quote ONLY the exact wrong word(s), maximum 5 words. NOT full sentences.
 
-Output format: [{"text": "wrong phrase", "label": "mischaracterization", "prob": 0.9}]
-If no hallucinations: []"""
+GOOD: [{"text": "red", "label": "mischaracterization", "prob": 0.9}]
+GOOD: [{"text": "four wheels", "label": "mischaracterization", "prob": 0.9}]
+BAD (too long): [{"text": "This mushroom does not have a traditional cap like many people picture", "label": "mischaracterization", "prob": 0.9}]
+
+Output: """
 
 
 def build_user_prompt(sample: dict) -> str:
@@ -180,9 +182,9 @@ def build_user_prompt(sample: dict) -> str:
 
     return (
         f"Image question: {prompt}\n"
-        f"Response to check: {response}\n\n"
-        f"Look at the image. Does the response contain any factually wrong claims "
-        f"about what is visible? Output the wrong phrases as JSON, or [] if accurate."
+        f"Response: {response}\n\n"
+        f"Find factually wrong text in the response based on the image. "
+        f"Output wrong words as JSON or [] if correct."
     )
 
 
