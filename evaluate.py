@@ -152,130 +152,47 @@ def split_eval_data(samples: list[dict], ratio: float = 0.10,
 
 
 # ============================================================================
-# Three different system prompts for multi-perspective evaluation
-# Each perspective focuses on different aspects of hallucination detection
+# Single system prompt with detailed instructions
+SYSTEM_PROMPT = """You are a hallucination detector for image descriptions.
 
-SYSTEM_PROMPT_VISUAL = """You are a VISUAL INSPECTOR. You compare images against text descriptions.
+TASK: Given an image and a text response about it, find text that is FACTUALLY WRONG.
 
-Your job: Look at the image FIRST, then check if the text accurately describes what you see.
+WHAT IS A HALLUCINATION:
+1. INVENTION: Something not in the image at all
+2. MISCARACTERIZATION: Wrong color, shape, size, or material
+3. MISCOUNTING: Wrong number of objects
+4. OCR: Incorrectly read text from the image
 
-WHAT TO CHECK:
-1. Object presence: Does the text mention objects that are NOT in the image? (label: "invention")
-2. Object attributes: Are colors, shapes, sizes, or materials described correctly? (label: "mischaracterization")
-3. Object count: Are the numbers of objects correct? (label: "miscounting")
-4. Text in image: If the text quotes text from the image, is it quoted correctly? (label: "OCR")
+RULES:
+- Output ONLY a JSON array: [{"text": "<wrong words>", "label": "<type>", "prob": 0.9}] or []
+- Quote ONLY the specific wrong words (1-3 words maximum, NOT full phrases)
+- Use correct label: invention, mischaracterization, OCR, or miscounting
+- Be CONSERVATIVE - only flag things you are VERY CONFIDENT are wrong
+- If unsure or response is correct, output []
+- Do NOT flag opinions, hedging, or interpretations
 
-BE LENIENT - only flag things that are CLEARLY wrong:
-- Wrong color (image shows red, text says blue)
-- Wrong object (image shows cat, text says dog)
-- Wrong count (image shows 3, text says 5)
-- Something mentioned that is completely absent from the image
+EXAMPLES:
+Image shows red car, text says "blue car" -> [{"text": "blue", "label": "mischaracterization", "prob": 0.9}]
+Image shows 3 dogs, text says "five dogs" -> [{"text": "five", "label": "miscounting", "prob": 0.9}]
+Image shows no cat, text says "the cat" -> [{"text": "cat", "label": "invention", "prob": 0.9}]
+Image shows mushroom with cap, text says "has a cap" -> []
 
-DO NOT FLAG:
-- Opinions ("beautiful", "ugly", "nice")
-- Hedging ("appears to", "seems like", "probably")
-- General categories ("flower" for a specific species)
-- Ambiguous or partially visible things
-- Reasonable interpretations
-
-OUTPUT FORMAT - ONLY a JSON array:
-- Found hallucination: [{"text": "<1-3 wrong words only>", "label": "<invention|mischaracterization|OCR|miscounting>", "prob": 0.9}]
-- No hallucination: []
-
-CRITICAL: Quote ONLY the specific wrong words (1-3 words maximum). Do NOT quote full phrases or sentences.
-Example: If response says "the bright red house" and house is actually blue, output [{"text": "bright red", "label": "mischaracterization", "prob": 0.9}]
-NOT: [{"text": "the bright red house", "label": "mischaracterization", "prob": 0.9}]
-
-Remember: Be CONSERVATIVE. If you're not SURE it's wrong, output []."""
+Output:"""
 
 
-SYSTEM_PROMPT_FACTCHECK = """You are a FACT CHECKER. You verify factual claims in text against images.
-
-Your job: Read each factual claim in the response and verify it against the image.
-
-FACTUAL CLAIMS TO CHECK:
-1. Existence claims ("there is a X", "the image shows X") -> label: "invention"
-2. Attribute claims ("the X is red", "the X is large") -> label: "mischaracterization"
-3. Count claims ("there are 5 X", "three X") -> label: "miscounting"
-4. Text claims ("the sign says X", "the text reads X") -> label: "OCR"
-
-FOR EACH CLAIM, ask:
-- Is this claim SUPPORTED by the image?
-- Is this claim CONTRADICTED by the image?
-- Is this claim UNVERIFIABLE from the image?
-
-ONLY flag claims that are CONTRADICTED by the image.
-Do NOT flag unverifiable claims or opinions.
-
-OUTPUT FORMAT - ONLY a JSON array:
-- Found contradiction: [{"text": "<1-3 wrong words only>", "label": "<invention|mischaracterization|OCR|miscounting>", "prob": 0.9}]
-- No contradictions: []
-
-CRITICAL: Quote ONLY the specific wrong words (1-3 words maximum). Do NOT quote full phrases or sentences.
-Example: If response says "the bright red house" and house is actually blue, output [{"text": "bright red", "label": "mischaracterization", "prob": 0.9}]
-NOT: [{"text": "the bright red house", "label": "mischaracterization", "prob": 0.9}]
-
-Be PRECISE - quote exactly the words that contradict the image. Maximum 3 words."""
-
-
-SYSTEM_PROMPT_DETAIL = """You are a DETAIL ANALYST. You focus on specific details in images and text.
-
-Your job: Examine fine details in the image and check if the text gets them right.
-
-DETAILS TO CHECK:
-1. Colors: Exact colors (not just "red" but "bright red", "dark red", "reddish") -> label: "mischaracterization"
-2. Shapes: Geometric shapes, forms, structures -> label: "mischaracterization"
-3. Materials: Wood, metal, glass, fabric, etc. -> label: "mischaracterization"
-4. Numbers: Count of specific objects -> label: "miscounting"
-5. Text: Any written text visible in the image -> label: "OCR"
-6. Objects: Things mentioned that aren't in the image -> label: "invention"
-
-BE THOROUGH but FAIR:
-- Flag definite errors (wrong color, wrong count, missing object)
-- Do NOT flag approximations ("about 5" when there are 4-6)
-- Do NOT flag style or artistic choices
-- Do NOT flag things that could be interpreted different ways
-
-OUTPUT FORMAT - ONLY a JSON array:
-- Found detail error: [{"text": "<1-3 wrong words only>", "label": "<invention|mischaracterization|OCR|miscounting>", "prob": 0.9}]
-- No detail errors: []
-
-CRITICAL: Quote ONLY the specific wrong words (1-3 words maximum). Do NOT quote full phrases or sentences.
-Example: If response says "the dark green leaves" and leaves are actually light green, output [{"text": "dark green", "label": "mischaracterization", "prob": 0.9}]
-NOT: [{"text": "the dark green leaves", "label": "mischaracterization", "prob": 0.9}]
-
-Focus on SPECIFIC, ACTIONABLE errors. If in doubt, output []."""
-
-
-def get_perspective_prompt(perspective_idx: int) -> str:
-    """Get the system prompt for a given perspective."""
-    prompts = [SYSTEM_PROMPT_VISUAL, SYSTEM_PROMPT_FACTCHECK, SYSTEM_PROMPT_DETAIL]
-    return prompts[perspective_idx % 3]
-
-
-def build_user_prompt(sample: dict, perspective_idx: int = 0) -> str:
+def build_user_prompt(sample: dict) -> str:
     """Build the user message for hallucination detection."""
     prompt = sample["prompt"]
     response = sample["response"]
 
-    perspective_instructions = [
-        "Look at the image first, then check if the text matches what you see.",
-        "Read each claim in the text and verify it against the image.",
-        "Examine the fine details - colors, shapes, counts, text - and check each one.",
-    ]
-
-    instruction = perspective_instructions[perspective_idx % 3]
-
     return (
         f"IMAGE QUESTION: {prompt}\n\n"
         f"RESPONSE TO CHECK: {response}\n\n"
-        f"YOUR TASK: {instruction}\n\n"
-        f"Rules:\n"
-        f"- Only flag FACTUAL ERRORS that you are CONFIDENT about\n"
-        f"- Quote ONLY the specific wrong words (1-3 words maximum, NOT full phrases)\n"
-        f"- Use correct label: invention, mischaracterization, OCR, or miscounting\n"
-        f"- If the response is correct or you're unsure, output []\n"
-        f"- Output ONLY a JSON array: [{{\"text\": \"...\", \"label\": \"...\", \"prob\": 0.9}}] or []"
+        f"Check if the response is factually correct about the image.\n"
+        f"Only flag definite factual errors (wrong color, wrong object, wrong count).\n"
+        f"Do NOT flag opinions, interpretations, or things that could be correct.\n"
+        f"Quote ONLY the specific wrong words (1-3 words maximum).\n"
+        f"Output ONLY a JSON array: [{{\"text\": \"...\", \"label\": \"...\", \"prob\": 0.9}}] or []"
     )
 
 
@@ -566,31 +483,8 @@ _IM_START = chr(60) + "|im_start|" + chr(62)
 _IM_END = chr(60) + "|im_end|" + chr(62)
 
 
-def _merge_labels(all_labels: list, response_length: int) -> list:
-    """Merge labels from multiple perspectives, deduplicating by span position.
-
-    Uses a union approach: if ANY perspective finds a hallucination at a position,
-    include it. For overlapping spans, keep the one with highest confidence.
-    """
-    if not all_labels:
-        return []
-
-    # Group labels by their character span position
-    position_map = {}
-    for label in all_labels:
-        start = label.get("start", -1)
-        end = label.get("end", -1)
-        key = (start, end)
-        if key not in position_map or label.get("prob", 0) > position_map[key].get("prob", 0):
-            position_map[key] = label
-
-    # Sort by start position
-    merged = sorted(position_map.values(), key=lambda x: x.get("start", 0))
-    return merged
-
-
 def run_inference(model, processor, sample: dict, max_new_tokens: int = 16384,
-                  enable_thinking: bool = True, perspective_idx: int = 0) -> str:
+                  enable_thinking: bool = True) -> str:
     """Run hallucination detection inference on a single sample."""
     from PIL import Image
 
@@ -609,15 +503,15 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 16384,
     if image is not None:
         user_content = [
             {"type": "image", "image": image},
-            {"type": "text", "text": build_user_prompt(sample, perspective_idx)},
+            {"type": "text", "text": build_user_prompt(sample)},
         ]
     else:
         user_content = [
-            {"type": "text", "text": build_user_prompt(sample, perspective_idx)},
+            {"type": "text", "text": build_user_prompt(sample)},
         ]
 
     messages = [
-        {"role": "system", "content": get_perspective_prompt(perspective_idx)},
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
 
@@ -732,7 +626,7 @@ def evaluate(args):
         ckpt = {"processed": 0, "predictions": [], "raw_outputs": []}
 
     # ── Inference loop ──
-    logger.info(f"\nRunning inference on {len(eval_samples)} samples (3 perspectives each)...")
+    logger.info(f"\nRunning inference on {len(eval_samples)} samples...")
     logger.info(f"Starting from sample {ckpt['processed']}")
 
     for idx in tqdm(range(ckpt["processed"], len(eval_samples)),
@@ -741,26 +635,12 @@ def evaluate(args):
         sample = eval_samples[idx]
 
         try:
-            all_labels = []
-            all_raw_outputs = []
-
-            # Run three different perspectives
-            for persp_idx in range(3):
-                raw_output = run_inference(
-                    model, processor, sample,
-                    max_new_tokens=args.max_new_tokens,
-                    enable_thinking=args.think,
-                    perspective_idx=persp_idx,
-                )
-                labels = parse_model_output(raw_output, sample["response"])
-                all_raw_outputs.append(raw_output)
-                all_labels.extend(labels)
-
-            # Merge labels from all perspectives (union, deduplicate by span position)
-            merged_labels = _merge_labels(all_labels, len(sample["response"]))
-            pred_labels = merged_labels
-            raw_output = " | ".join(all_raw_outputs)
-
+            raw_output = run_inference(
+                model, processor, sample,
+                max_new_tokens=args.max_new_tokens,
+                enable_thinking=args.think,
+            )
+            pred_labels = parse_model_output(raw_output, sample["response"])
             # Log raw output
             clean_output = raw_output
             clean_output = clean_output.strip()
