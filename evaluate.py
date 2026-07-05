@@ -470,11 +470,16 @@ def _extract_labels_from_thinking(thinking_text, response_text):
     return []
 
 
-def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) -> str:
-    """Run hallucination detection inference on a single sample.
+LG = chr(60)  # <
+RG = chr(62)  # >
+TAG_OPEN = LG + "think" + RG
+TAG_CLOSE = LG + "/think" + RG
+THINK_FILL = LG + "think" + RG + LG + "/think" + RG
 
-    Uses greedy decoding with the instruct model to produce JSON directly.
-    """
+
+def run_inference(model, processor, sample: dict, max_new_tokens: int = 16384,
+                  enable_thinking: bool = True) -> str:
+    """Run hallucination detection inference on a single sample."""
     from PIL import Image
 
     image_name = sample.get("image_name", "")
@@ -504,9 +509,16 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) ->
         {"role": "user", "content": user_content},
     ]
 
-    text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    template_kwargs = {"tokenize": False, "add_generation_prompt": True}
+    try:
+        text = processor.apply_chat_template(
+            messages, enable_thinking=enable_thinking, **template_kwargs
+        )
+    except TypeError:
+        text = processor.apply_chat_template(messages, **template_kwargs)
+
+    if not enable_thinking:
+        text += "["
 
     try:
         from qwen_vl_utils import process_vision_info
@@ -518,33 +530,32 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) ->
     except ImportError:
         image_inputs, video_inputs = None, None
 
-    kwargs = {
-        "text": [text],
-        "padding": True,
-        "return_tensors": "pt"
-    }
+    kwargs = {"text": [text], "padding": True, "return_tensors": "pt"}
     if image_inputs is not None:
         kwargs["images"] = image_inputs
     if video_inputs is not None:
         kwargs["videos"] = video_inputs
 
     inputs = processor(**kwargs)
-
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    gen_kwargs = {
-        "max_new_tokens": max_new_tokens,
-        "do_sample": False,
-    }
+    gen_kwargs = {"max_new_tokens": max_new_tokens}
+    if enable_thinking:
+        gen_kwargs.update({"do_sample": True, "temperature": 0.7, "top_p": 0.9})
+    else:
+        gen_kwargs.update({"do_sample": False})
 
     with torch.no_grad():
         output_ids = model.generate(**inputs, **gen_kwargs)
 
     input_len = inputs["input_ids"].shape[1]
     generated_ids = output_ids[0][input_len:]
-    response = processor.decode(generated_ids, skip_special_tokens=True)
-    return response.strip()
+    response = processor.decode(generated_ids, skip_special_tokens=False)
+    for tag in [TAG_CLOSE, TAG_OPEN, THINK_FILL]:
+        response = response.replace(tag, "")
+    response = response.replace("\n", " ").strip()
+    return response
 
 
 # ============================================================================
