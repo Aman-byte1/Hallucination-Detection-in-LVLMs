@@ -2,7 +2,7 @@
 """
 SHROOM-Visions Hallucination Detection Evaluation
 ===================================================
-Single-script evaluation pipeline using Qwen2.5-VL-2B-Instruct model.
+Single-script evaluation pipeline using Qwen3-VL-2B-Thinking model.
 
 Evaluates hallucination span detection on a held-out 10% of the English
 training data, computes IoU (span identification) and Pearson correlation
@@ -36,7 +36,7 @@ from tqdm import tqdm
 # Configuration
 # ============================================================================
 
-DEFAULT_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
+DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-2B-Thinking"
 DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
 IMAGES_DIR = Path(__file__).parent / "shroom-vis-images"
 OUTPUT_DIR = Path(__file__).parent / "outputs"
@@ -257,6 +257,13 @@ def parse_model_output(output_text: str, response_text: str = "") -> list[dict]:
                     except json.JSONDecodeError:
                         pass
 
+    # Fallback: if output is empty but thinking has answers
+    if (not parsed or parsed == []) and '<think>' in output_text:
+        think_part = output_text.split('</think>', 1)[0] if '</think>' in output_text else output_text
+        think_part = think_part.replace('<think>', "")
+        result = _extract_labels_from_thinking(think_part, response_text)
+        if result:
+            return result
     if parsed is None:
         return []
 
@@ -441,6 +448,28 @@ def load_model(model_id: str):
     return model, processor
 
 
+
+def _extract_labels_from_thinking(thinking_text, response_text):
+    """Extract hallucination labels from thinking chain as fallback."""
+    extracted = []
+    for m in re.finditer(r'\{[^{}]+\}', thinking_text):
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict) and "text" in obj and "label" in obj:
+                extracted.append(obj)
+        except json.JSONDecodeError:
+            try:
+                fixed = m.group(0).replace("'", '"')
+                obj = json.loads(fixed)
+                if isinstance(obj, dict) and "text" in obj and "label" in obj:
+                    extracted.append(obj)
+            except json.JSONDecodeError:
+                pass
+    if extracted:
+        return resolve_labels(extracted, response_text)
+    return []
+
+
 def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048) -> str:
     """Run hallucination detection inference on a single sample.
 
@@ -595,6 +624,7 @@ def evaluate(args):
             raw_output = run_inference(
                 model, processor, sample,
                 max_new_tokens=args.max_new_tokens,
+                enable_thinking=args.think,
             )
             pred_labels = parse_model_output(raw_output, sample["response"])
             # Log raw output — show head and tail to see if JSON is at the end
@@ -907,7 +937,7 @@ Examples:
   python evaluate.py                            # Full evaluation
   python evaluate.py --max_samples 10           # Quick test (10 samples)
   python evaluate.py --resume                   # Resume from checkpoint
-  python evaluate.py --model_id Qwen/Qwen2-VL-2B-Instruct
+  python evaluate.py --model_id Qwen/Qwen3-VL-2B-Thinking
         """,
     )
     parser.add_argument(
@@ -919,8 +949,12 @@ Examples:
         help="Max number of samples to evaluate (default: all)",
     )
     parser.add_argument(
-        "--max_new_tokens", type=int, default=2048,
-        help="Max tokens for model generation (default: 2048)",
+        "--max_new_tokens", type=int, default=16384,
+        help="Max tokens for model generation (default: 16384)",
+    )
+    parser.add_argument(
+        "--no_think", action="store_true",
+        help="Disable thinking mode (greedy output, no CoT reasoning chain).",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -928,6 +962,12 @@ Examples:
     )
 
     args = parser.parse_args()
+    args.think = not args.no_think
+
+    if args.think:
+        logger.info("Thinking mode enabled.")
+    else:
+        logger.info("Thinking mode disabled (greedy output).")
 
     # Validate data file exists
     if not TRAIN_FILE.exists():
