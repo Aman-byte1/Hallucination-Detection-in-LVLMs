@@ -196,9 +196,17 @@ def parse_model_output(output_text: str, response_text: str = "") -> list[dict]:
     import ast
     text = output_text.strip()
 
-    # Remove thinking/reasoning tags if present (Qwen3 thinking model)
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    text = re.sub(r"<\|think\|>.*?<\|/think\|>", "", text, flags=re.DOTALL)
+    # Robustly strip thinking/reasoning blocks
+    # Since the starting <think> tag may have been part of the prompt,
+    # we split on the closing tag to grab only the final response.
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1]
+    elif "<|/think|>" in text:
+        text = text.split("<|/think|>", 1)[1]
+    else:
+        # Fallback to standard regex
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<\|think\|>.*?<\|/think\|>", "", text, flags=re.DOTALL)
 
     # Remove markdown code block wrappers
     text = re.sub(r"```json\s*", "", text)
@@ -493,8 +501,8 @@ def load_model(model_id: str):
     return model, processor
 
 
-def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048,
-                  enable_thinking: bool = False) -> str:
+def run_inference(model, processor, sample: dict, max_new_tokens: int = 4096,
+                  enable_thinking: bool = True) -> str:
     """Run hallucination detection inference on a single sample.
     
     Args:
@@ -590,7 +598,7 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 2048,
     if enable_thinking:
         gen_kwargs.update({
             "do_sample": True,
-            "temperature": 0.6,
+            "temperature": 1.0,
             "top_p": 0.95,
             "top_k": 20,
         })
@@ -1021,16 +1029,15 @@ Examples:
     )
     parser.add_argument(
         "--max_samples", type=int, default=None,
-        help="Limit number of eval samples (for testing)",
+        help="Max number of samples to evaluate (default: all)",
     )
     parser.add_argument(
-        "--max_new_tokens", type=int, default=32768,
-        help="Max tokens for model generation (default: 32768)",
+        "--max_new_tokens", type=int, default=4096,
+        help="Max tokens for model generation (default: 4096)",
     )
     parser.add_argument(
-        "--think", action="store_true",
-        help="Enable thinking mode (CoT reasoning chain). Uses more tokens "
-             "and may get stuck in reasoning loops on a 2B model.",
+        "--no_think", action="store_true",
+        help="Disable thinking mode (greedy output, no CoT reasoning chain).",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -1038,6 +1045,9 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Convert no_think flag to positive think variable
+    args.think = not args.no_think
 
     if args.think:
         logger.info("Thinking mode enabled — model will use CoT reasoning.")
