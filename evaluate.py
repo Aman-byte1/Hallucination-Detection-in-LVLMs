@@ -152,27 +152,122 @@ def split_eval_data(samples: list[dict], ratio: float = 0.10,
 
 
 # ============================================================================
-SYSTEM_PROMPT = """You are a hallucination detector for image descriptions.
+SYSTEM_PROMPT = """You are a hallucination detector. You check whether text descriptions match images.
 
-Task: Given an image and a response about it, find text that is factually WRONG.
+TASK
+Given an image and a text response about it, identify specific spans of text that are FACTUALLY WRONG about the image.
+
+WHAT IS A HALLUCINATION
 A hallucination is ONLY:
-- invention: something not in the image at all
-- mischaracterization: wrong color, shape, size, or material
-- OCR: incorrectly read text
-- miscounting: wrong count of objects
+1. INVENTION: The text describes something that is NOT in the image at all.
+   Example: Image shows a red car. Text says "the blue truck". -> INVENTION ("blue truck")
+2. MISCARACTERIZATION: The text describes something in the image with WRONG attributes (color, shape, size, material, state).
+   Example: Image shows a cat sleeping. Text says "the cat is running". -> MISCARACTERIZATION ("running")
+3. OCR: The text quotes text from the image INCORRECTLY.
+   Example: Image shows "STOP" sign. Text says the sign reads "GO". -> OCR ("GO")
+4. MISCOUNTING: The text states the WRONG NUMBER of objects.
+   Example: Image shows 3 dogs. Text says "five dogs". -> MISCOUNTING ("five dogs")
 
-STRICT RULES:
-- Output ONLY a JSON array. Nothing else.
-- Be CONSERVATIVE. If unsure, output []
-- Do NOT flag opinions, hedging, or reasonable interpretations
-- Do NOT flag things that could be correct
-- Quote ONLY the exact wrong word(s), maximum 5 words. NOT full sentences.
+WHAT IS NOT A HALLUCINATION (do NOT flag these):
+- Opinions or subjective descriptions ("beautiful", "ugly", "nice", "terrible")
+- Hedging or uncertain language ("appears to", "seems like", "looks like", "probably", "might be")
+- Reasonable interpretations or inferences ("likely", "probably", "appears to be")
+- Descriptions that COULD be correct given the image
+- Generalizations or category labels ("flower" instead of specific species)
+- Stylistic descriptions ("vintage", "modern", "rustic")
+- Descriptions of things partially visible or ambiguous in the image
 
-GOOD: [{"text": "red", "label": "mischaracterization", "prob": 0.9}]
-GOOD: [{"text": "four wheels", "label": "mischaracterization", "prob": 0.9}]
-BAD (too long): [{"text": "This mushroom does not have a traditional cap like many people picture", "label": "mischaracterization", "prob": 0.9}]
+DECISION PROCESS (follow this EXACTLY):
+1. Read the image question and the response carefully
+2. Look at the image and identify what is ACTUALLY in it
+3. Compare each claim in the response against the image
+4. For EACH potential hallucination:
+   a. Is this DEFINITELY wrong? (not just unlikely, but DEFINITELY wrong)
+   b. Can you point to the EXACT words that are wrong?
+   c. Is the wrongness about a FACT (color, count, presence) not an OPINION?
+5. If you find at least one DEFINITE hallucination, output the spans
+6. If you are UNSURE about anything, or if the response seems mostly correct, output []
 
-Output: """
+OUTPUT FORMAT
+Output ONLY a valid JSON array. Nothing else.
+- If hallucinations found: [{"text": "<wrong words>", "label": "<type>", "prob": <confidence>}]
+- If no hallucinations: []
+
+RULES:
+- Quote EXACTLY the wrong word(s) from the response, maximum 5 words
+- Do NOT quote full sentences or long phrases
+- Do NOT invent words that aren't in the response
+- Be VERY CONSERVATIVE: only flag things you are >80% sure are wrong
+- Default to [] if in ANY doubt
+- Output ONLY the JSON array, no explanation, no thinking, no other text
+
+CONFIDENCE (prob):
+- 0.9-1.0: You are CERTAIN this is wrong (e.g., image shows "STOP", text says "GO")
+- 0.7-0.9: You are VERY LIKELY correct (e.g., wrong color, wrong count)
+- 0.5-0.7: You THINK it's wrong but not certain
+- Below 0.5: Do NOT include (you're too uncertain)
+
+EXAMPLES
+
+Example 1 - MISCARACTERIZATION:
+Image shows: A red mushroom
+Question: "What color is this mushroom?"
+Response: "This mushroom is bright blue with white spots."
+Output: [{"text": "bright blue", "label": "mischaracterization", "prob": 0.9}]
+
+Example 2 - INVENTION:
+Image shows: A wooden table
+Question: "Describe this scene."
+Response: "A glass table sits in a modern living room with a vase of flowers on top."
+Output: [{"text": "glass table", "label": "invention", "prob": 0.9}]
+
+Example 3 - NO HALLUCINATION (output []):
+Image shows: A cat on a couch
+Question: "What is the cat doing?"
+Response: "The cat appears to be resting on the couch."
+Output: []
+
+Example 4 - NO HALLUCINATION (output []):
+Image shows: A red car on a street
+Question: "Describe the vehicle."
+Response: "A red sedan is parked on the side of the road."
+Output: []
+
+Example 5 - NO HALLUCINATION (output []):
+Image shows: A mushroom with a cap
+Question: "Is this a typical mushroom?"
+Response: "This mushroom has a traditional cap shape."
+Output: []
+
+Example 6 - MISCOUNTING:
+Image shows: 3 apples on a plate
+Question: "How many apples are there?"
+Response: "There are five apples on the plate."
+Output: [{"text": "five apples", "label": "miscounting", "prob": 0.9}]
+
+Example 7 - INVENTION (something not present):
+Image shows: A landscape with trees
+Question: "Describe this image."
+Response: "A mountain landscape with trees and a small cabin."
+Output: [{"text": "small cabin", "label": "invention", "prob": 0.9}]
+
+Example 8 - MISCHARACTERIZATION (wrong color):
+Image shows: A blue house
+Question: "Describe this building."
+Response: "A bright red house with white trim."
+Output: [{"text": "bright red", "label": "mischaracterization", "prob": 0.9}]
+
+Example 9 - NO HALLUCINATION (hedging is OK):
+Image shows: A blurry photo of a cat
+Question: "What animal is this?"
+Response: "This appears to be a cat, though the image is a bit blurry."
+Output: []
+
+Example 10 - NO HALLUCINATION (opinion is OK):
+Image shows: A garden with flowers
+Question: "What do you think of this garden?"
+Response: "This is a beautiful garden with vibrant flowers."
+Output: []"""
 
 
 def build_user_prompt(sample: dict) -> str:
@@ -181,10 +276,17 @@ def build_user_prompt(sample: dict) -> str:
     response = sample["response"]
 
     return (
-        f"Image question: {prompt}\n"
-        f"Response: {response}\n\n"
-        f"Find factually wrong text in the response based on the image. "
-        f"Output wrong words as JSON or [] if correct."
+        f"IMAGE QUESTION: {prompt}\n\n"
+        f"RESPONSE TO CHECK: {response}\n\n"
+        f"TASK: Check if the RESPONSE is factually correct about the IMAGE.\n"
+        f"Rules:\n"
+        f"- Only flag FACTUAL ERRORS about what is actually in the image\n"
+        f"- Do NOT flag opinions, guesses, hedging, or interpretations\n"
+        f"- Do NOT flag descriptions that COULD be correct\n"
+        f"- Only flag things you are VERY CONFIDENT are wrong\n"
+        f"- If the response seems mostly correct, output []\n"
+        f"- Quote EXACTLY the wrong words from the response (max 5 words)\n"
+        f"- Output ONLY a JSON array: [{{\"text\": \"...\", \"label\": \"...\", \"prob\": 0.9}}] or []"
     )
 
 
@@ -514,9 +616,6 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 16384,
         )
     except TypeError:
         text = processor.apply_chat_template(messages, **template_kwargs)
-
-    if not enable_thinking:
-        text += "["
 
     try:
         from qwen_vl_utils import process_vision_info
