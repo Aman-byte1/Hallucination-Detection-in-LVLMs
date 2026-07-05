@@ -152,30 +152,28 @@ def split_eval_data(samples: list[dict], ratio: float = 0.10,
 
 
 # ============================================================================
-# Single system prompt with detailed instructions
-SYSTEM_PROMPT = """You are a hallucination detector for image descriptions.
-
-TASK: Given an image and a text response about it, find text that is FACTUALLY WRONG.
-
-WHAT IS A HALLUCINATION:
-1. INVENTION: Something not in the image at all
-2. MISCARACTERIZATION: Wrong color, shape, size, or material
-3. MISCOUNTING: Wrong number of objects
-4. OCR: Incorrectly read text from the image
+# Single system prompt with detailed examples
+SYSTEM_PROMPT = """You are a hallucination detector. Check if text responses about images contain factual errors.
 
 RULES:
-- Output ONLY a JSON array: [{"text": "<wrong words>", "label": "<type>", "prob": 0.9}] or []
-- Quote ONLY the specific wrong words (1-3 words maximum, NOT full phrases)
-- Use correct label: invention, mischaracterization, OCR, or miscounting
-- Be CONSERVATIVE - only flag things you are VERY CONFIDENT are wrong
-- If unsure or response is correct, output []
-- Do NOT flag opinions, hedging, or interpretations
+- Output ONLY a JSON array: [{"text": "<wrong>", "label": "<type>", "prob": 0.9}] or []
+- Quote 1-3 words MAXIMUM - the specific wrong part
+- Correct labels: invention, mischaracterization, OCR, miscounting
+- Be AGGRESSIVE - flag anything that seems wrong
+- If the text says something exists and it doesn't, that's invention
+- If the text says something is X color/shape/size but it's different, that's mischaracterization
+- If the text says wrong number, that's miscounting
+- If the text misquotes text from image, that's OCR
+- Do NOT flag opinions ("beautiful", "nice") or hedging ("appears", "seems")
 
-EXAMPLES:
-Image shows red car, text says "blue car" -> [{"text": "blue", "label": "mischaracterization", "prob": 0.9}]
-Image shows 3 dogs, text says "five dogs" -> [{"text": "five", "label": "miscounting", "prob": 0.9}]
-Image shows no cat, text says "the cat" -> [{"text": "cat", "label": "invention", "prob": 0.9}]
-Image shows mushroom with cap, text says "has a cap" -> []
+EXAMPLES (image → text → output):
+- Image has red car, text says "blue car" → [{"text": "blue", "label": "mischaracterization", "prob": 0.9}]
+- Image has 3 dogs, text says "five dogs" → [{"text": "five", "label": "miscounting", "prob": 0.9}]
+- Image has no cat, text says "the cat sits" → [{"text": "cat", "label": "invention", "prob": 0.9}]
+- Image has cat with white fur, text says "black fur" → [{"text": "black", "label": "mischaracterization", "prob": 0.9}]
+- Image shows sign "STOP", text says "sign says GO" → [{"text": "GO", "label": "OCR", "prob": 0.9}]
+- Image has 2 birds, text says "birds" (no count) → []
+- Image has mushroom with cap, text says "has a cap" → []
 
 Output:"""
 
@@ -188,11 +186,8 @@ def build_user_prompt(sample: dict) -> str:
     return (
         f"IMAGE QUESTION: {prompt}\n\n"
         f"RESPONSE TO CHECK: {response}\n\n"
-        f"Check if the response is factually correct about the image.\n"
-        f"Only flag definite factual errors (wrong color, wrong object, wrong count).\n"
-        f"Do NOT flag opinions, interpretations, or things that could be correct.\n"
-        f"Quote ONLY the specific wrong words (1-3 words maximum).\n"
-        f"Output ONLY a JSON array: [{{\"text\": \"...\", \"label\": \"...\", \"prob\": 0.9}}] or []"
+        f"Find factual errors. Flag anything that seems wrong.\n"
+        f"Quote 1-3 wrong words only. Output JSON array or []."
     )
 
 
