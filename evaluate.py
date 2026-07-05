@@ -36,7 +36,7 @@ from tqdm import tqdm
 # Configuration
 # ============================================================================
 
-DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
+DEFAULT_MODEL_ID = "Qwen/Qwen3.5-4B"
 DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
 IMAGES_DIR = Path(__file__).parent / "shroom-vis-images"
 OUTPUT_DIR = Path(__file__).parent / "outputs"
@@ -160,10 +160,10 @@ SYSTEM_PROMPT_VISUAL = """You are a VISUAL INSPECTOR. You compare images against
 Your job: Look at the image FIRST, then check if the text accurately describes what you see.
 
 WHAT TO CHECK:
-1. Object presence: Does the text mention objects that are NOT in the image? (INVENTION)
-2. Object attributes: Are colors, shapes, sizes, or materials described correctly? (MISCARACTERIZATION)
-3. Object count: Are the numbers of objects correct? (MISCOUNTING)
-4. Text in image: If the text quotes text from the image, is it quoted correctly? (OCR)
+1. Object presence: Does the text mention objects that are NOT in the image? (label: "invention")
+2. Object attributes: Are colors, shapes, sizes, or materials described correctly? (label: "mischaracterization")
+3. Object count: Are the numbers of objects correct? (label: "miscounting")
+4. Text in image: If the text quotes text from the image, is it quoted correctly? (label: "OCR")
 
 BE LENIENT - only flag things that are CLEARLY wrong:
 - Wrong color (image shows red, text says blue)
@@ -179,8 +179,12 @@ DO NOT FLAG:
 - Reasonable interpretations
 
 OUTPUT FORMAT - ONLY a JSON array:
-- Found hallucination: [{"text": "<exact wrong words>", "label": "<type>", "prob": 0.9}]
+- Found hallucination: [{"text": "<1-3 wrong words only>", "label": "<invention|mischaracterization|OCR|miscounting>", "prob": 0.9}]
 - No hallucination: []
+
+CRITICAL: Quote ONLY the specific wrong words (1-3 words maximum). Do NOT quote full phrases or sentences.
+Example: If response says "the bright red house" and house is actually blue, output [{"text": "bright red", "label": "mischaracterization", "prob": 0.9}]
+NOT: [{"text": "the bright red house", "label": "mischaracterization", "prob": 0.9}]
 
 Remember: Be CONSERVATIVE. If you're not SURE it's wrong, output []."""
 
@@ -190,10 +194,10 @@ SYSTEM_PROMPT_FACTCHECK = """You are a FACT CHECKER. You verify factual claims i
 Your job: Read each factual claim in the response and verify it against the image.
 
 FACTUAL CLAIMS TO CHECK:
-1. Existence claims ("there is a X", "the image shows X")
-2. Attribute claims ("the X is red", "the X is large")
-3. Count claims ("there are 5 X", "three X")
-4. Text claims ("the sign says X", "the text reads X")
+1. Existence claims ("there is a X", "the image shows X") -> label: "invention"
+2. Attribute claims ("the X is red", "the X is large") -> label: "mischaracterization"
+3. Count claims ("there are 5 X", "three X") -> label: "miscounting"
+4. Text claims ("the sign says X", "the text reads X") -> label: "OCR"
 
 FOR EACH CLAIM, ask:
 - Is this claim SUPPORTED by the image?
@@ -204,10 +208,14 @@ ONLY flag claims that are CONTRADICTED by the image.
 Do NOT flag unverifiable claims or opinions.
 
 OUTPUT FORMAT - ONLY a JSON array:
-- Found contradiction: [{"text": "<exact contradictory words>", "label": "<type>", "prob": 0.9}]
+- Found contradiction: [{"text": "<1-3 wrong words only>", "label": "<invention|mischaracterization|OCR|miscounting>", "prob": 0.9}]
 - No contradictions: []
 
-Be PRECISE - quote exactly the words that contradict the image. Maximum 5 words."""
+CRITICAL: Quote ONLY the specific wrong words (1-3 words maximum). Do NOT quote full phrases or sentences.
+Example: If response says "the bright red house" and house is actually blue, output [{"text": "bright red", "label": "mischaracterization", "prob": 0.9}]
+NOT: [{"text": "the bright red house", "label": "mischaracterization", "prob": 0.9}]
+
+Be PRECISE - quote exactly the words that contradict the image. Maximum 3 words."""
 
 
 SYSTEM_PROMPT_DETAIL = """You are a DETAIL ANALYST. You focus on specific details in images and text.
@@ -215,12 +223,12 @@ SYSTEM_PROMPT_DETAIL = """You are a DETAIL ANALYST. You focus on specific detail
 Your job: Examine fine details in the image and check if the text gets them right.
 
 DETAILS TO CHECK:
-1. Colors: Exact colors (not just "red" but "bright red", "dark red", "reddish")
-2. Shapes: Geometric shapes, forms, structures
-3. Materials: Wood, metal, glass, fabric, etc.
-4. Numbers: Count of specific objects
-5. Text: Any written text visible in the image
-6. Positions: Where objects are located relative to each other
+1. Colors: Exact colors (not just "red" but "bright red", "dark red", "reddish") -> label: "mischaracterization"
+2. Shapes: Geometric shapes, forms, structures -> label: "mischaracterization"
+3. Materials: Wood, metal, glass, fabric, etc. -> label: "mischaracterization"
+4. Numbers: Count of specific objects -> label: "miscounting"
+5. Text: Any written text visible in the image -> label: "OCR"
+6. Objects: Things mentioned that aren't in the image -> label: "invention"
 
 BE THOROUGH but FAIR:
 - Flag definite errors (wrong color, wrong count, missing object)
@@ -229,8 +237,12 @@ BE THOROUGH but FAIR:
 - Do NOT flag things that could be interpreted different ways
 
 OUTPUT FORMAT - ONLY a JSON array:
-- Found detail error: [{"text": "<exact wrong detail words>", "label": "<type>", "prob": 0.9}]
+- Found detail error: [{"text": "<1-3 wrong words only>", "label": "<invention|mischaracterization|OCR|miscounting>", "prob": 0.9}]
 - No detail errors: []
+
+CRITICAL: Quote ONLY the specific wrong words (1-3 words maximum). Do NOT quote full phrases or sentences.
+Example: If response says "the dark green leaves" and leaves are actually light green, output [{"text": "dark green", "label": "mischaracterization", "prob": 0.9}]
+NOT: [{"text": "the dark green leaves", "label": "mischaracterization", "prob": 0.9}]
 
 Focus on SPECIFIC, ACTIONABLE errors. If in doubt, output []."""
 
@@ -260,7 +272,8 @@ def build_user_prompt(sample: dict, perspective_idx: int = 0) -> str:
         f"YOUR TASK: {instruction}\n\n"
         f"Rules:\n"
         f"- Only flag FACTUAL ERRORS that you are CONFIDENT about\n"
-        f"- Quote EXACTLY the wrong words from the response (max 5 words)\n"
+        f"- Quote ONLY the specific wrong words (1-3 words maximum, NOT full phrases)\n"
+        f"- Use correct label: invention, mischaracterization, OCR, or miscounting\n"
         f"- If the response is correct or you're unsure, output []\n"
         f"- Output ONLY a JSON array: [{{\"text\": \"...\", \"label\": \"...\", \"prob\": 0.9}}] or []"
     )
