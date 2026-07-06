@@ -439,12 +439,10 @@ def load_model(model_id: str):
     is_deepseek = "deepseek" in model_id.lower()
 
     if is_deepseek:
-        from transformers import AutoConfig, AutoProcessor, AutoModelForCausalLM
-        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        from transformers import AutoProcessor, AutoModelForCausalLM
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            config=config,
             torch_dtype=dtype,
             device_map="auto",
             trust_remote_code=True,
