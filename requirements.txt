@@ -6,3 +6,4 @@ numpy
 tqdm
 tabulate
 qwen-vl-utils
+deepseek_vl

@@ -36,7 +36,7 @@ from tqdm import tqdm
 # Configuration
 # ============================================================================
 
-DEFAULT_MODEL_ID = "Qwen/Qwen3.5-9B"
+DEFAULT_MODEL_ID = "deepseek-ai/deepseek-vl2-tiny"
 DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
 IMAGES_DIR = Path(__file__).parent / "shroom-vis-images"
 OUTPUT_DIR = Path(__file__).parent / "outputs"
@@ -417,9 +417,7 @@ def find_image(image_name: str, base_dir: Path) -> Path | None:
 
 
 def load_model(model_id: str):
-    """Load a Qwen VL model and processor."""
-    from transformers import AutoProcessor, AutoModelForImageTextToText
-
+    """Load a VL model and processor."""
     logger.info(f"Loading model: {model_id}")
     logger.info(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
@@ -437,16 +435,29 @@ def load_model(model_id: str):
         dtype = torch.float32
         logger.info("Using float32 (CPU)")
 
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    # Detect model type
+    is_deepseek = "deepseek" in model_id.lower()
 
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_id,
-        torch_dtype=dtype,
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    if is_deepseek:
+        from deepseek_vl.models import DeepseekVLV2Processor, DeepseekVLV2ForCausalLM
+        processor = DeepseekVLV2Processor.from_pretrained(model_id, trust_remote_code=True)
+        model = DeepseekVLV2ForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+    else:
+        from transformers import AutoProcessor, AutoModelForImageTextToText
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+
     model.eval()
-
     logger.info("Model loaded successfully")
     return model, processor
 
@@ -478,7 +489,7 @@ _IM_START = chr(60) + "|im_start|" + chr(62)
 _IM_END = chr(60) + "|im_end|" + chr(62)
 
 
-def run_inference(model, processor, sample: dict, max_new_tokens: int = 16384,
+def run_inference(model, processor, sample: dict, max_new_tokens: int = 512,
                   enable_thinking: bool = True) -> str:
     """Run hallucination detection inference on a single sample."""
     from PIL import Image
@@ -495,65 +506,118 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 16384,
         except Exception as e:
             logger.warning(f"Error opening image {image_path}: {e}")
 
-    if image is not None:
-        user_content = [
-            {"type": "image", "image": image},
-            {"type": "text", "text": build_user_prompt(sample)},
+    # Detect model type
+    model_class = type(model).__name__
+    is_deepseek = "deepseek" in model_class.lower() or "DeepseekVL" in model_class
+
+    if is_deepseek:
+        # DeepSeek-VL2 inference
+        from deepseek_vl.utils.io import load_pil_images
+
+        conversation = [
+            {
+                "role": "<|User|>",
+                "content": "<image>\n" + build_user_prompt(sample),
+                "images": [str(image_path)] if image_path else [],
+            },
+            {"role": "<|Assistant|>", "content": ""},
         ]
+
+        if not image_path:
+            conversation[0]["content"] = build_user_prompt(sample)
+            conversation[0].pop("images", None)
+
+        try:
+            pil_images = load_pil_images(conversation)
+            prepare_inputs = processor(
+                conversations=conversation,
+                images=pil_images,
+                force_batchify=True,
+                system_prompt=SYSTEM_PROMPT,
+            ).to(model.device)
+
+            inputs_embeds = model.prepare_inputs_embeds(**prepare_inputs)
+
+            with torch.no_grad():
+                outputs = model.language_model.generate(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=prepare_inputs.attention_mask,
+                    pad_token_id=processor.tokenizer.eos_token_id,
+                    bos_token_id=processor.tokenizer.bos_token_id,
+                    eos_token_id=processor.tokenizer.eos_token_id,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    use_cache=True,
+                )
+
+            response = processor.tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=False)
+            response = response.replace("\n", " ").strip()
+            return response
+        except Exception as e:
+            logger.warning(f"DeepSeek inference error: {e}")
+            return ""
+
     else:
-        user_content = [
-            {"type": "text", "text": build_user_prompt(sample)},
-        ]
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
-
-    template_kwargs = {"tokenize": False, "add_generation_prompt": True}
-    try:
-        text = processor.apply_chat_template(
-            messages, enable_thinking=enable_thinking, **template_kwargs
-        )
-    except TypeError:
-        text = processor.apply_chat_template(messages, **template_kwargs)
-
-    try:
-        from qwen_vl_utils import process_vision_info
-        vision_outputs = process_vision_info(messages)
-        if len(vision_outputs) == 3:
-            image_inputs, video_inputs, _ = vision_outputs
+        # Qwen-style inference
+        if image is not None:
+            user_content = [
+                {"type": "image", "image": image},
+                {"type": "text", "text": build_user_prompt(sample)},
+            ]
         else:
-            image_inputs, video_inputs = vision_outputs
-    except ImportError:
-        image_inputs, video_inputs = None, None
+            user_content = [
+                {"type": "text", "text": build_user_prompt(sample)},
+            ]
 
-    kwargs = {"text": [text], "padding": True, "return_tensors": "pt"}
-    if image_inputs is not None:
-        kwargs["images"] = image_inputs
-    if video_inputs is not None:
-        kwargs["videos"] = video_inputs
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
 
-    inputs = processor(**kwargs)
-    device = next(model.parameters()).device
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+        template_kwargs = {"tokenize": False, "add_generation_prompt": True}
+        try:
+            text = processor.apply_chat_template(
+                messages, enable_thinking=enable_thinking, **template_kwargs
+            )
+        except TypeError:
+            text = processor.apply_chat_template(messages, **template_kwargs)
 
-    gen_kwargs = {"max_new_tokens": max_new_tokens}
-    if enable_thinking:
-        gen_kwargs.update({"do_sample": True, "temperature": 0.7, "top_p": 0.9})
-    else:
-        gen_kwargs.update({"do_sample": False})
+        try:
+            from qwen_vl_utils import process_vision_info
+            vision_outputs = process_vision_info(messages)
+            if len(vision_outputs) == 3:
+                image_inputs, video_inputs, _ = vision_outputs
+            else:
+                image_inputs, video_inputs = vision_outputs
+        except ImportError:
+            image_inputs, video_inputs = None, None
 
-    with torch.no_grad():
-        output_ids = model.generate(**inputs, **gen_kwargs)
+        kwargs = {"text": [text], "padding": True, "return_tensors": "pt"}
+        if image_inputs is not None:
+            kwargs["images"] = image_inputs
+        if video_inputs is not None:
+            kwargs["videos"] = video_inputs
 
-    input_len = inputs["input_ids"].shape[1]
-    generated_ids = output_ids[0][input_len:]
-    response = processor.decode(generated_ids, skip_special_tokens=False)
-    # Clean extra special tokens - but NOT thinking tags (parse_model_output needs them)
-    response = response.replace(_IM_START, "").replace(_IM_END, "")
-    response = response.replace("\n", " ").strip()
-    return response
+        inputs = processor(**kwargs)
+        device = next(model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        gen_kwargs = {"max_new_tokens": max_new_tokens}
+        if enable_thinking:
+            gen_kwargs.update({"do_sample": True, "temperature": 0.7, "top_p": 0.9})
+        else:
+            gen_kwargs.update({"do_sample": False})
+
+        with torch.no_grad():
+            output_ids = model.generate(**inputs, **gen_kwargs)
+
+        input_len = inputs["input_ids"].shape[1]
+        generated_ids = output_ids[0][input_len:]
+        response = processor.decode(generated_ids, skip_special_tokens=False)
+        # Clean extra special tokens - but NOT thinking tags (parse_model_output needs them)
+        response = response.replace(_IM_START, "").replace(_IM_END, "")
+        response = response.replace("\n", " ").strip()
+        return response
 
 
 # ============================================================================
