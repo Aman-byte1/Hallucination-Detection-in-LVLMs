@@ -36,7 +36,7 @@ from tqdm import tqdm
 # Configuration
 # ============================================================================
 
-DEFAULT_MODEL_ID = "deepseek-ai/deepseek-vl2-tiny"
+DEFAULT_MODEL_ID = "Qwen/Qwen3.5-9B"
 DATA_DIR = Path(__file__).parent / "shroom-visions-data" / "distrib"
 IMAGES_DIR = Path(__file__).parent / "shroom-vis-images"
 OUTPUT_DIR = Path(__file__).parent / "outputs"
