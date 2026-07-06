@@ -958,8 +958,8 @@ Examples:
         help="Max number of samples to evaluate (default: all)",
     )
     parser.add_argument(
-        "--max_new_tokens", type=int, default=16384,
-        help="Max tokens for model generation (default: 16384)",
+        "--max_new_tokens", type=int, default=512,
+        help="Max tokens for model generation (default: 512)",
     )
     parser.add_argument(
         "--no_think", action="store_true",
