@@ -439,9 +439,9 @@ def load_model(model_id: str):
     is_deepseek = "deepseek" in model_id.lower()
 
     if is_deepseek:
-        from transformers import AutoProcessor, AutoModelForCausalLM
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(
+        from deepseek_vl.models import DeepseekVLV2Processor, DeepseekVLV2ForCausalLM
+        processor = DeepseekVLV2Processor.from_pretrained(model_id, trust_remote_code=True)
+        model = DeepseekVLV2ForCausalLM.from_pretrained(
             model_id,
             torch_dtype=dtype,
             device_map="auto",
@@ -512,19 +512,7 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 512,
 
     if is_deepseek:
         # DeepSeek-VL2 inference
-        from PIL import Image as PILImage
-
-        def _load_pil_images(conversation):
-            """Simple replacement for deepseek_vl.utils.io.load_pil_images."""
-            images = []
-            for msg in conversation:
-                if "images" in msg:
-                    for img_path in msg["images"]:
-                        try:
-                            images.append(PILImage.open(img_path).convert("RGB"))
-                        except Exception:
-                            images.append(PILImage.new("RGB", (384, 384)))
-            return images
+        from deepseek_vl.utils.io import load_pil_images
 
         conversation = [
             {
@@ -540,7 +528,7 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 512,
             conversation[0].pop("images", None)
 
         try:
-            pil_images = _load_pil_images(conversation)
+            pil_images = load_pil_images(conversation)
             prepare_inputs = processor(
                 conversations=conversation,
                 images=pil_images,
