@@ -439,7 +439,7 @@ def load_model(model_id: str):
     is_deepseek = "deepseek" in model_id.lower()
 
     if is_deepseek:
-        from deepseek_vl.models import DeepseekVLV2Processor, DeepseekVLV2ForCausalLM
+        from deepseek_vl2.models import DeepseekVLV2Processor, DeepseekVLV2ForCausalLM
         processor = DeepseekVLV2Processor.from_pretrained(model_id, trust_remote_code=True)
         model = DeepseekVLV2ForCausalLM.from_pretrained(
             model_id,
@@ -512,7 +512,7 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 512,
 
     if is_deepseek:
         # DeepSeek-VL2 inference
-        from deepseek_vl.utils.io import load_pil_images
+        from deepseek_vl2.utils.io import load_pil_images
 
         conversation = [
             {
