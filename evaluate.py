@@ -512,7 +512,19 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 512,
 
     if is_deepseek:
         # DeepSeek-VL2 inference
-        from transformers import load_pil_images
+        from PIL import Image as PILImage
+
+        def _load_pil_images(conversation):
+            """Simple replacement for deepseek_vl.utils.io.load_pil_images."""
+            images = []
+            for msg in conversation:
+                if "images" in msg:
+                    for img_path in msg["images"]:
+                        try:
+                            images.append(PILImage.open(img_path).convert("RGB"))
+                        except Exception:
+                            images.append(PILImage.new("RGB", (384, 384)))
+            return images
 
         conversation = [
             {
@@ -528,7 +540,7 @@ def run_inference(model, processor, sample: dict, max_new_tokens: int = 512,
             conversation[0].pop("images", None)
 
         try:
-            pil_images = load_pil_images(conversation)
+            pil_images = _load_pil_images(conversation)
             prepare_inputs = processor(
                 conversations=conversation,
                 images=pil_images,
