@@ -1,0 +1,33 @@
+# Finetuning dependencies for SHROOM-Visions
+# Install with: pip install -r requirements_finetune.txt
+# NOTE: Requires transformers v5+ for Qwen3.5 support
+
+# Unsloth (2x faster training, 50% less VRAM)
+unsloth
+
+# Core ML
+torch>=2.4.0
+transformers>=5.0.0
+accelerate
+datasets
+
+# Training
+trl>=0.17.0
+peft>=0.15.0
+
+# Optimizer
+bitsandbytes
+
+# Vision
+pillow
+qwen-vl-utils
+
+# Utilities
+numpy
+scipy
+
+# HuggingFace upload
+huggingface_hub
+
+# Optional: experiment tracking (uncomment to use)
+# wandb
