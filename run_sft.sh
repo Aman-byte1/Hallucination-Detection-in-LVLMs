@@ -28,6 +28,9 @@
 
 set -euo pipefail
 
+# Disable HF xet downloads — they stall on some RunPod instances
+export HF_HUB_DISABLE_XET=1
+
 REPO_URL="https://github.com/Aman-byte1/Hallucination-Detection-in-LVLMs.git"
 REPO_DIR="Hallucination-Detection-in-LVLMs"
 
