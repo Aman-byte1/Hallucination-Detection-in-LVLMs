@@ -315,7 +315,7 @@ def train(
         1, len(train_dataset) // (args.batch_size * args.grad_accum)
     )
     eval_steps = max(1, steps_per_epoch // 4)   # Eval ~4 times per epoch
-    save_steps = max(1, steps_per_epoch // 2)    # Save ~2 times per epoch
+    save_steps = eval_steps * 2                  # Save ~2 times per epoch (must be multiple of eval_steps)
     logger.info(
         f"Steps/epoch: {steps_per_epoch}, "
         f"eval every {eval_steps} steps, save every {save_steps} steps"
