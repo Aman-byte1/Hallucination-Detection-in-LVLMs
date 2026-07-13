@@ -10,6 +10,7 @@ build/
 
 # Virtual environments
 venv/
+venv_finetune/
 env/
 .venv/
 .env/
@@ -25,6 +26,7 @@ env/
 .ipynb_checkpoints/
 
 # Model checkpoints & cache
+checkpoints/
 models/
 *.bin
 *.safetensors
