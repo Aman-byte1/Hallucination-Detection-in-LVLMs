@@ -249,7 +249,7 @@ def load_model(model_id: str, max_seq_length: int, lora_rank: int):
     logger.info(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
-        mem_gb = torch.cuda.get_device_properties(0).total_mem / 1e9
+        mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
         logger.info(f"GPU Memory: {mem_gb:.1f} GB")
 
     # Load base model in BF16 (NOT 4-bit — Unsloth docs say QLoRA not
