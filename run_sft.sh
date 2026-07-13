@@ -204,8 +204,9 @@ if [ -z "$HF_TOKEN" ]; then
 fi
 
 pip install huggingface_hub --quiet
-huggingface-cli login --token "$HF_TOKEN"
+python -c "from huggingface_hub import login; login(token='$HF_TOKEN')"
 echo "  ✓ Authenticated with HuggingFace."
+
 
 # ============================================================================
 # Step 5: SFT Finetuning + Push to Hub
