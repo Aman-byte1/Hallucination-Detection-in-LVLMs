@@ -478,6 +478,18 @@ def load_model(model_id: str, max_seq_length: int, lora_rank: int):
         fast_inference=False,
     )
 
+    # ── Disable Qwen3.5 thinking mode ──
+    # Qwen3.5's chat template generates <think>...</think> blocks by default.
+    # These consume all completion tokens, leaving no room for JSON output.
+    # Prepending `enable_thinking = false` forces direct answer generation.
+    if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template:
+        if 'enable_thinking' in tokenizer.chat_template:
+            tokenizer.chat_template = (
+                "{%- set enable_thinking = false -%}\n"
+                + tokenizer.chat_template
+            )
+            logger.info("Disabled thinking mode in chat template")
+
     logger.info("Applying LoRA adapters for GRPO...")
     model = FastVisionModel.get_peft_model(
         model,
