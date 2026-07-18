@@ -124,19 +124,33 @@ except ImportError:
     print('False')
 " 2>/dev/null || echo "False")
 
-if [ "$CUDA_OK" = "True" ]; then
-    echo "  ✓ PyTorch with CUDA already installed. Skipping reinstall."
-else
-    echo "  Installing PyTorch + torchvision..."
-    pip install --force-reinstall --no-cache-dir torch torchvision --index-url "$TORCH_INDEX"
-fi
+# Check if dependencies are already installed
+DEPS_OK=$(python -c "
+try:
+    import unsloth
+    import trl
+    print('True')
+except ImportError:
+    print('False')
+" 2>/dev/null || echo "False")
 
-# ── Install RL + evaluation dependencies ──
-echo "  Installing Unsloth + RL dependencies..."
-pip install --upgrade unsloth unsloth_zoo
-pip install "trl>=0.17.0" "peft>=0.15.0" datasets accelerate bitsandbytes
-pip install scipy numpy tqdm tabulate pillow qwen-vl-utils
-pip install huggingface_hub
+if [ "$DEPS_OK" = "True" ]; then
+    echo "  ✓ Dependencies already installed. Skipping pip install."
+else
+    if [ "$CUDA_OK" = "True" ]; then
+        echo "  ✓ PyTorch with CUDA already installed. Skipping reinstall."
+    else
+        echo "  Installing PyTorch + torchvision..."
+        pip install --force-reinstall --no-cache-dir torch torchvision --index-url "$TORCH_INDEX"
+    fi
+
+    # ── Install RL + evaluation dependencies ──
+    echo "  Installing Unsloth + RL dependencies..."
+    pip install --upgrade unsloth unsloth_zoo
+    pip install "trl>=0.17.0" "peft>=0.15.0" datasets accelerate bitsandbytes
+    pip install scipy numpy tqdm tabulate pillow qwen-vl-utils
+    pip install huggingface_hub
+fi
 
 # Verify GPU
 python -c "
