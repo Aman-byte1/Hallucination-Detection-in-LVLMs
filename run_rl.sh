@@ -53,7 +53,7 @@ echo ""
 # ============================================================================
 # Step 1: Clone the repository (skip if already inside it)
 # ============================================================================
-echo "[1/8] Checking repository..."
+echo "[1/9] Checking repository..."
 
 if [ -f "rl_grpo.py" ] && [ -f "evaluate.py" ]; then
     echo "  Already inside the repo directory. Skipping clone."
@@ -73,7 +73,7 @@ echo "  Working directory: $(pwd)"
 # Step 2: Python venv + CUDA-aware PyTorch + dependencies
 # ============================================================================
 echo ""
-echo "[2/8] Setting up Python environment..."
+echo "[2/9] Setting up Python environment..."
 
 if [ ! -d "venv_rl" ]; then
     python3 -m venv venv_rl
@@ -152,7 +152,7 @@ if torch.cuda.is_available():
 # Step 3: Download SHROOM data + images
 # ============================================================================
 echo ""
-echo "[3/8] Downloading SHROOM-Visions data and images..."
+echo "[3/9] Downloading SHROOM-Visions data and images..."
 
 if [ ! -d "shroom-visions-data/distrib" ]; then
     echo "  Downloading data zip..."
@@ -183,7 +183,7 @@ echo "  Training samples: $TRAIN_COUNT"
 # Step 4: HuggingFace authentication
 # ============================================================================
 echo ""
-echo "[4/8] Authenticating with HuggingFace..."
+echo "[4/9] Authenticating with HuggingFace..."
 
 if [ -z "${HF_TOKEN:-}" ]; then
     if [ -n "${1:-}" ]; then
@@ -208,7 +208,7 @@ echo "  ✓ Authenticated with HuggingFace."
 # Step 5: GRPO RL Training
 # ============================================================================
 echo ""
-echo "[5/8] Starting GRPO RL Training..."
+echo "[5/9] Starting GRPO RL Training..."
 echo "  SFT Model:      $SFT_MODEL_ID"
 echo "  Hub upload:      $HUB_MODEL_ID"
 echo "  Max steps:       $MAX_STEPS"
@@ -239,7 +239,7 @@ echo "  ✓ GRPO training complete. Model pushed to $HUB_MODEL_ID"
 # Step 6: Evaluate the GRPO model on held-out 10% test split
 # ============================================================================
 echo ""
-echo "[6/8] Evaluating GRPO model on held-out test split..."
+echo "[6/9] Evaluating GRPO model on held-out test split..."
 echo "  Model:  ${OUTPUT_DIR}/merged"
 echo ""
 
@@ -263,7 +263,7 @@ fi
 # Step 7: Evaluate the SFT baseline for comparison
 # ============================================================================
 echo ""
-echo "[7/8] Evaluating SFT baseline for comparison..."
+echo "[7/9] Evaluating SFT baseline for comparison..."
 echo "  Model:  $SFT_MODEL_ID"
 echo ""
 
@@ -284,7 +284,7 @@ echo "  ✓ SFT baseline evaluation complete."
 # Step 8: Compare results
 # ============================================================================
 echo ""
-echo "[8/8] Comparing GRPO vs SFT results..."
+echo "[8/9] Comparing GRPO vs SFT results..."
 
 python -c "
 import json
@@ -329,6 +329,246 @@ except Exception as e:
     print(f'Error comparing results: {e}')
 "
 
+# ============================================================================
+# Step 9: Upload model card with evaluation results to HuggingFace
+# ============================================================================
+echo ""
+echo "[9/9] Uploading model card with eval results to HuggingFace..."
+
+export HUB_MODEL_ID="$HUB_MODEL_ID"
+export HF_TOKEN="$HF_TOKEN"
+
+python << 'MODELCARD_SCRIPT'
+import json
+import os
+from datetime import datetime
+from huggingface_hub import HfApi
+
+hub_model_id = os.environ.get("HUB_MODEL_ID", "amanuelbyte/Qwen3.5-4B-SHROOM-GRPO")
+hf_token = os.environ.get("HF_TOKEN", "")
+
+# ── Load metrics ──
+try:
+    grpo = json.load(open("outputs_grpo/metrics_en.json"))
+except FileNotFoundError:
+    grpo = None
+    print("  WARNING: outputs_grpo/metrics_en.json not found")
+
+try:
+    sft = json.load(open("outputs_sft/metrics_en.json"))
+except FileNotFoundError:
+    sft = None
+    print("  WARNING: outputs_sft/metrics_en.json not found")
+
+# ── Helper to safely get nested metric ──
+def get_metric(data, *keys, default="N/A"):
+    if data is None:
+        return default
+    obj = data
+    for k in keys:
+        if isinstance(obj, dict) and k in obj:
+            obj = obj[k]
+        else:
+            return default
+    return obj
+
+# ── Build the model card ──
+def fmt(val, decimals=4):
+    if isinstance(val, (int, float)):
+        return f"{val:.{decimals}f}"
+    return str(val)
+
+now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+readme = f"""---
+license: apache-2.0
+tags:
+  - hallucination-detection
+  - vision-language-model
+  - grpo
+  - reinforcement-learning
+  - unsloth
+  - qwen3.5
+  - shroom
+base_model: amanuelbyte/Qwen3.5-4B-SHROOM-SFT
+datasets:
+  - shroom-visions
+language:
+  - en
+pipeline_tag: image-text-to-text
+model-index:
+  - name: Qwen3.5-4B-SHROOM-GRPO
+    results:
+      - task:
+          type: hallucination-detection
+          name: Hallucination Detection in VLM Outputs
+        dataset:
+          name: SHROOM-Visions (English, 10% held-out)
+          type: shroom-visions
+        metrics:
+          - name: Overall IoU
+            type: iou
+            value: {get_metric(grpo, 'metrics', 'overall', 'iou_mean', default=0)}
+          - name: Detection Accuracy
+            type: accuracy
+            value: {get_metric(grpo, 'metrics', 'detection_stats', 'detection_accuracy', default=0)}
+          - name: Overall Calibration
+            type: calibration
+            value: {get_metric(grpo, 'metrics', 'overall', 'calibration_mean', default=0)}
+---
+
+# 🧠 Qwen3.5-4B-SHROOM-GRPO
+
+**Hallucination detector for Vision-Language Model outputs**, trained with GRPO (Group Relative Policy Optimization) reinforcement learning on top of the SFT-finetuned [Qwen3.5-4B-SHROOM-SFT](https://huggingface.co/amanuelbyte/Qwen3.5-4B-SHROOM-SFT).
+
+## 🔬 Model Description
+
+This model detects factual errors (hallucinations) in text descriptions of images generated by Vision-Language Models. Given an image and a text response, it outputs a JSON array of detected hallucinated spans with their types and confidence scores.
+
+**Training pipeline:**
+1. **Base model:** `Qwen/Qwen3.5-4B`
+2. **SFT (Supervised Fine-Tuning):** Trained on SHROOM-Visions labeled data → `amanuelbyte/Qwen3.5-4B-SHROOM-SFT`
+3. **GRPO (Reinforcement Learning):** Further trained with 4 custom reward functions → **this model**
+
+### Reward Functions
+
+| Reward Function | Max Score | Description |
+|---|---|---|
+| `format_reward` | +2.0 | Valid JSON array output |
+| `detection_reward` | +3.0 | Correctly identifies hallucination presence |
+| `span_iou_reward` | +4.0 | Character-level IoU between predicted and gold spans |
+| `label_accuracy_reward` | +1.0 | Uses correct category labels |
+
+### Training Configuration
+
+| Parameter | Value |
+|---|---|
+| RL Algorithm | Dr-GRPO (via Unsloth) |
+| Max steps | 500 |
+| Generations per prompt | 4 |
+| Max completion length | 256 tokens |
+| Learning rate | 5e-6 |
+| LoRA rank | 16 |
+| Gradient accumulation | 4 |
+| Precision | bf16 |
+| GPU | NVIDIA A40 (48GB) |
+
+## 📊 Evaluation Results
+
+Evaluated on 10% held-out split of SHROOM-Visions English data (seed=42).
+"""
+
+# ── Add comparison table ──
+if grpo is not None:
+    gm = grpo["metrics"]
+    readme += f"""
+### GRPO Model Results
+
+| Metric | Value |
+|---|---|
+| Overall IoU (mean ± std) | {fmt(gm['overall']['iou_mean'])} ± {fmt(gm['overall']['iou_std'])} |
+| Overall IoU (median) | {fmt(gm['overall']['iou_median'])} |
+| Overall Calibration (mean ± std) | {fmt(gm['overall']['calibration_mean'])} ± {fmt(gm['overall']['calibration_std'])} |
+| Overall Calibration (median) | {fmt(gm['overall']['calibration_median'])} |
+| Hallucinated IoU (mean) | {fmt(gm['hallucinated_samples']['iou_mean'])} |
+| Clean IoU (mean) | {fmt(gm['clean_samples']['iou_mean'])} |
+| Detection Accuracy | {fmt(gm['detection_stats']['detection_accuracy'])} |
+"""
+    det = gm["detection_stats"]
+    readme += f"""| Clean Correct | {det['clean_correct']}/{det['total_clean']} ({fmt(det['clean_correct']/max(det['total_clean'],1)*100, 1)}%) |
+| Halluc Correct | {det['halluc_correct']}/{det['total_halluc']} ({fmt(det['halluc_correct']/max(det['total_halluc'],1)*100, 1)}%) |
+"""
+
+if grpo is not None and sft is not None:
+    gm = grpo["metrics"]
+    sm = sft["metrics"]
+    readme += f"""
+### Comparison: GRPO vs SFT Baseline
+
+| Metric | SFT | GRPO (RL) | Delta |
+|---|---|---|---|
+| Overall IoU | {fmt(sm['overall']['iou_mean'])} | {fmt(gm['overall']['iou_mean'])} | {fmt(gm['overall']['iou_mean'] - sm['overall']['iou_mean'], 4)} |
+| Overall Calibration | {fmt(sm['overall']['calibration_mean'])} | {fmt(gm['overall']['calibration_mean'])} | {fmt(gm['overall']['calibration_mean'] - sm['overall']['calibration_mean'], 4)} |
+| Hallucinated IoU | {fmt(sm['hallucinated_samples']['iou_mean'])} | {fmt(gm['hallucinated_samples']['iou_mean'])} | {fmt(gm['hallucinated_samples']['iou_mean'] - sm['hallucinated_samples']['iou_mean'], 4)} |
+| Clean IoU | {fmt(sm['clean_samples']['iou_mean'])} | {fmt(gm['clean_samples']['iou_mean'])} | {fmt(gm['clean_samples']['iou_mean'] - sm['clean_samples']['iou_mean'], 4)} |
+| Detection Accuracy | {fmt(sm['detection_stats']['detection_accuracy'])} | {fmt(gm['detection_stats']['detection_accuracy'])} | {fmt(gm['detection_stats']['detection_accuracy'] - sm['detection_stats']['detection_accuracy'], 4)} |
+"""
+
+readme += f"""
+## 🚀 Usage
+
+```python
+from unsloth import FastVisionModel
+from PIL import Image
+
+model, tokenizer = FastVisionModel.from_pretrained(
+    "{hub_model_id}",
+    load_in_4bit=True,
+)
+FastVisionModel.for_inference(model)
+
+image = Image.open("your_image.jpg")
+
+messages = [
+    {{
+        "role": "user",
+        "content": [
+            {{"type": "image", "image": image}},
+            {{"type": "text", "text": "IMAGE QUESTION: Describe this image.\\n\\nRESPONSE TO CHECK: The image shows a blue car.\\n\\nFind factual errors. Output JSON array or []."}},
+        ],
+    }}
+]
+
+inputs = tokenizer.apply_chat_template(
+    messages, add_generation_prompt=True, return_tensors="pt"
+).to(model.device)
+
+output = model.generate(input_ids=inputs, max_new_tokens=256)
+print(tokenizer.decode(output[0], skip_special_tokens=True))
+```
+
+## 📝 Output Format
+
+```json
+[{{{"text": "blue", "label": "mischaracterization", "prob": 0.9}}}}]
+```
+
+Supported hallucination labels:
+- `invention` — object/entity that doesn't exist in the image
+- `mischaracterization` — wrong attribute (color, shape, size, etc.)
+- `miscounting` — wrong number/count
+- `OCR` — misquoted text from the image
+
+## 🏋️ Training Framework
+
+- [Unsloth](https://github.com/unslothai/unsloth) for efficient vision model training
+- [TRL](https://github.com/huggingface/trl) GRPOTrainer for reinforcement learning
+- [SHROOM-Visions](https://github.com/Aman-byte1/Hallucination-Detection-in-LVLMs) dataset and evaluation
+
+---
+*Model card auto-generated on {now}*
+"""
+
+# ── Upload to HuggingFace ──
+api = HfApi()
+try:
+    api.upload_file(
+        path_or_fileobj=readme.encode("utf-8"),
+        path_in_repo="README.md",
+        repo_id=hub_model_id,
+        repo_type="model",
+        token=hf_token,
+        commit_message="Update model card with evaluation results",
+    )
+    print(f"  ✓ Model card uploaded to https://huggingface.co/{hub_model_id}")
+except Exception as e:
+    print(f"  WARNING: Failed to upload model card: {e}")
+    # Save locally as fallback
+    with open("model_card_README.md", "w", encoding="utf-8") as f:
+        f.write(readme)
+    print("  Saved locally to model_card_README.md")
+MODELCARD_SCRIPT
+
 echo ""
 echo "============================================================"
 echo "  ✓ SHROOM-Visions GRPO RL Pipeline Complete!"
@@ -341,14 +581,5 @@ echo ""
 echo "  Evaluation results:"
 echo "    GRPO:  outputs_grpo/metrics_en.json"
 echo "    SFT:   outputs_sft/metrics_en.json"
-echo ""
-echo "  Compare with:"
-echo "    python -c \""
-echo "      import json"
-echo "      grpo = json.load(open('outputs_grpo/metrics_en.json'))"
-echo "      sft  = json.load(open('outputs_sft/metrics_en.json'))"
-echo "      print(f'GRPO IoU: {grpo[\\\"metrics\\\"][\\\"overall\\\"][\\\"iou_mean\\\"]:.4f}')"
-echo "      print(f'SFT  IoU: {sft[\\\"metrics\\\"][\\\"overall\\\"][\\\"iou_mean\\\"]:.4f}')"
-echo "    \""
 echo ""
 echo "============================================================"
