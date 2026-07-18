@@ -26,6 +26,7 @@ set -euo pipefail
 # Disable HF xet downloads — they stall on some RunPod instances
 export HF_HUB_DISABLE_XET=1
 export HF_HOME="/workspace/huggingface_cache"
+export HF_HUB_ENABLE_HF_TRANSFER=1
 
 REPO_URL="https://github.com/Aman-byte1/Hallucination-Detection-in-LVLMs.git"
 REPO_DIR="Hallucination-Detection-in-LVLMs"
@@ -148,7 +149,7 @@ else
     echo "  Installing Unsloth + RL dependencies..."
     pip install --upgrade unsloth unsloth_zoo
     pip install "trl>=0.17.0" "peft>=0.15.0" datasets accelerate bitsandbytes
-    pip install scipy numpy tqdm tabulate pillow qwen-vl-utils
+    pip install scipy numpy tqdm tabulate pillow qwen-vl-utils hf-transfer
     pip install huggingface_hub
 fi
 
