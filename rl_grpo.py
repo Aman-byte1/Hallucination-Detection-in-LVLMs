@@ -157,7 +157,7 @@ def prepare_grpo_dataset(
         image_name = sample.get("image_name", "")
         image_path = find_image(image_name, images_path) if image_name else None
 
-        user_text = build_user_prompt(sample)
+        user_text = f"{SYSTEM_PROMPT}\n\n{build_user_prompt(sample)}"
 
         # Build multimodal user content
         if image_path is not None:
@@ -171,9 +171,8 @@ def prepare_grpo_dataset(
                 {"type": "text", "text": user_text},
             ]
 
-        # Prompt = system + user (no assistant — model generates that)
+        # Prompt = user role only (system prompt is prepended)
         prompt = [
-            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
 
