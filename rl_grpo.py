@@ -302,6 +302,27 @@ def _compute_char_iou(
 # Reward Functions
 # ============================================================================
 
+def _extract_completion_text(completion) -> str:
+    """Extract text from a TRL completion (may be str or list of message dicts)."""
+    if isinstance(completion, str):
+        return completion
+    if isinstance(completion, list):
+        # TRL passes completions as [{"role": "assistant", "content": "..."}]
+        for msg in completion:
+            if isinstance(msg, dict) and "content" in msg:
+                content = msg["content"]
+                if isinstance(content, str):
+                    return content
+                # content could be a list of dicts [{"type": "text", "text": "..."}]
+                if isinstance(content, list):
+                    return " ".join(
+                        item.get("text", "") for item in content
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    )
+        # Fallback: join all string elements
+        return " ".join(str(x) for x in completion)
+    return str(completion)
+
 def format_reward(completions, **kwargs) -> list[float]:
     """Reward for outputting valid JSON array format.
 
@@ -312,7 +333,8 @@ def format_reward(completions, **kwargs) -> list[float]:
     """
     scores = []
     for completion in completions:
-        parsed = _parse_json_output(completion)
+        text = _extract_completion_text(completion)
+        parsed = _parse_json_output(text)
 
         if parsed is not None:
             all_valid = all(
@@ -325,11 +347,11 @@ def format_reward(completions, **kwargs) -> list[float]:
             score = -1.0
 
         # Penalise gibberish / repetitive output
-        if len(completion) > 0:
-            cleaned = completion.replace("addCriterion", "").replace("\n", "")
-            if (len(completion) - len(cleaned)) / len(completion) >= 0.3:
+        if len(text) > 0:
+            cleaned = text.replace("addCriterion", "").replace("\n", "")
+            if (len(text) - len(cleaned)) / len(text) >= 0.3:
                 score -= 2.0
-            if len(completion) > 1000:
+            if len(text) > 1000:
                 score -= 0.5
 
         scores.append(score)
@@ -344,10 +366,11 @@ def detection_reward(completions, gold_labels_json, **kwargs) -> list[float]:
     """
     scores = []
     for completion, gold_json in zip(completions, gold_labels_json):
+        text = _extract_completion_text(completion)
         gold = json.loads(gold_json)
         gold_has = len(gold) > 0
 
-        parsed = _parse_json_output(completion)
+        parsed = _parse_json_output(text)
         if parsed is None:
             scores.append(-1.0)
             continue
@@ -369,8 +392,9 @@ def span_iou_reward(
     for completion, gold_json, resp in zip(
         completions, gold_labels_json, response_text
     ):
+        text = _extract_completion_text(completion)
         gold = json.loads(gold_json)
-        parsed = _parse_json_output(completion)
+        parsed = _parse_json_output(text)
 
         if parsed is None:
             scores.append(-1.0)
@@ -394,8 +418,9 @@ def label_accuracy_reward(
     """
     scores = []
     for completion, gold_json in zip(completions, gold_labels_json):
+        text = _extract_completion_text(completion)
         gold = json.loads(gold_json)
-        parsed = _parse_json_output(completion)
+        parsed = _parse_json_output(text)
 
         if parsed is None:
             scores.append(-0.5)
