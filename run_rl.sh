@@ -133,10 +133,10 @@ fi
 
 # ── Install RL + evaluation dependencies ──
 echo "  Installing Unsloth + RL dependencies..."
-pip install --upgrade --force-reinstall --no-cache-dir unsloth unsloth_zoo --quiet
-pip install "trl>=0.17.0" "peft>=0.15.0" datasets accelerate bitsandbytes --quiet
-pip install scipy numpy tqdm tabulate pillow qwen-vl-utils --quiet
-pip install huggingface_hub --quiet
+pip install --upgrade unsloth unsloth_zoo
+pip install "trl>=0.17.0" "peft>=0.15.0" datasets accelerate bitsandbytes
+pip install scipy numpy tqdm tabulate pillow qwen-vl-utils
+pip install huggingface_hub
 
 # Verify GPU
 python -c "
