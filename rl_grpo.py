@@ -173,7 +173,7 @@ def prepare_grpo_dataset(
 
         # Prompt = system + user (no assistant — model generates that)
         prompt = [
-            {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
 
