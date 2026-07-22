@@ -152,27 +152,38 @@ def prepare_grpo_dataset(
     # Convert to GRPO format
     grpo_data = []
     n_with_image = 0
+    from PIL import Image
 
     for sample in train_samples:
         image_name = sample.get("image_name", "")
         image_path = find_image(image_name, images_path) if image_name else None
 
-        user_text = f"{SYSTEM_PROMPT}\n\n{build_user_prompt(sample)}"
+        user_text = build_user_prompt(sample)
 
-        # Build multimodal user content
+        # Build multimodal user content & load image
+        images_list = []
         if image_path is not None:
-            user_content = [
-                {"type": "image", "image": str(image_path)},
-                {"type": "text", "text": user_text},
-            ]
-            n_with_image += 1
+            try:
+                img = Image.open(image_path).convert("RGB")
+                user_content = [
+                    {"type": "image"},
+                    {"type": "text", "text": user_text},
+                ]
+                images_list = [img]
+                n_with_image += 1
+            except Exception as e:
+                logger.warning(f"Error opening image {image_path}: {e}")
+                user_content = [
+                    {"type": "text", "text": user_text},
+                ]
         else:
             user_content = [
                 {"type": "text", "text": user_text},
             ]
 
-        # Prompt = user role only (system prompt is prepended)
+        # Use system and user roles both containing list of dicts to satisfy PyArrow schema
         prompt = [
+            {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
             {"role": "user", "content": user_content},
         ]
 
@@ -180,6 +191,7 @@ def prepare_grpo_dataset(
 
         grpo_data.append({
             "prompt": prompt,
+            "images": images_list,
             "gold_labels_json": json.dumps(labels, ensure_ascii=False),
             "response_text": sample["response"],
             "has_hallucination": len(labels) > 0,
@@ -478,17 +490,22 @@ def load_model(model_id: str, max_seq_length: int, lora_rank: int):
         fast_inference=False,
     )
 
-    # ── Disable Qwen3.5 thinking mode ──
-    # Qwen3.5's chat template generates <think>...</think> blocks by default.
-    # These consume all completion tokens, leaving no room for JSON output.
-    # Prepending `enable_thinking = false` forces direct answer generation.
+    # ── Modify Chat Template for GRPO VLM ──
     if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template:
-        if 'enable_thinking' in tokenizer.chat_template:
-            tokenizer.chat_template = (
-                "{%- set enable_thinking = false -%}\n"
-                + tokenizer.chat_template
-            )
-            logger.info("Disabled thinking mode in chat template")
+        # Force disable thinking mode (closed think tags always appended on assistant start)
+        tokenizer.chat_template = tokenizer.chat_template.replace(
+            "enable_thinking is defined and enable_thinking is false",
+            "true"
+        )
+        # Remove system message image/video checks that crash on Arrow-padded null fields
+        tokenizer.chat_template = tokenizer.chat_template.replace(
+            "raise_exception('System message cannot contain images.')",
+            "''"
+        ).replace(
+            "raise_exception('System message cannot contain videos.')",
+            "''"
+        )
+        logger.info("Customized chat template to disable thinking and bypass system image checks.")
 
     logger.info("Applying LoRA adapters for GRPO...")
     model = FastVisionModel.get_peft_model(
@@ -567,7 +584,7 @@ def train_grpo(model, tokenizer, dataset: Dataset, args):
 
     trainer = GRPOTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         reward_funcs=[
             format_reward,
             detection_reward,

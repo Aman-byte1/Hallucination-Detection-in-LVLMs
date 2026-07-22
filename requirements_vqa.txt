@@ -1,0 +1,32 @@
+# VQA Model Finetuning Dependencies for SHROOM-Visions
+# Used by: finetune_minicpm.py, finetune_blip.py, evaluate_minicpm.py, evaluate_blip.py
+# Install with: pip install -r requirements_vqa.txt
+# NOTE: Does NOT require Unsloth (MiniCPM/BLIP not supported by Unsloth)
+
+# Core ML
+torch>=2.4.0
+transformers>=4.40.0
+accelerate
+datasets
+
+# LoRA fine-tuning (for MiniCPM-V-2)
+peft>=0.15.0
+
+# Training
+trl>=0.17.0
+
+# Optimizer
+bitsandbytes
+
+# Vision
+pillow
+torchvision
+
+# Metrics & utilities
+numpy
+scipy
+tabulate
+tqdm
+
+# HuggingFace upload
+huggingface_hub
