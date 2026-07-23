@@ -327,27 +327,30 @@ class MiniCPMV46DataCollator:
             "labels": torch.stack(labels_list),
         }
 
-        # Stack vision tensors (pixel_values, image_sizes, etc.) so model.forward receives Tensors
+        # Helper to stack vision tensors, padding if shapes differ due to dynamic image slicing
+        def pad_and_stack(tensor_list):
+            if not isinstance(tensor_list[0], torch.Tensor):
+                return tensor_list
+            try:
+                return torch.stack(tensor_list)
+            except RuntimeError:
+                # Pad variable shapes to max size across batch
+                max_dims = [max(t.shape[i] for t in tensor_list) for i in range(tensor_list[0].dim())]
+                padded = []
+                for t in tensor_list:
+                    pad_amounts = []
+                    for i in reversed(range(t.dim())):
+                        pad_amounts.extend([0, max_dims[i] - t.shape[i]])
+                    padded.append(torch.nn.functional.pad(t, pad_amounts))
+                return torch.stack(padded)
+
+        # Stack vision tensors so model.forward receives Tensors
         if "pixel_values" in batch[0]:
-            pvs = [item["pixel_values"] for item in batch]
-            if isinstance(pvs[0], torch.Tensor):
-                try:
-                    result["pixel_values"] = torch.stack(pvs)
-                except Exception:
-                    result["pixel_values"] = torch.cat(pvs, dim=0)
-            else:
-                result["pixel_values"] = pvs
+            result["pixel_values"] = pad_and_stack([item["pixel_values"] for item in batch])
 
         for key in ["image_sizes", "image_bound", "tgt_sizes", "pixel_values_videos"]:
             if key in batch[0]:
-                vals = [item[key] for item in batch]
-                if isinstance(vals[0], torch.Tensor):
-                    try:
-                        result[key] = torch.stack(vals)
-                    except Exception:
-                        result[key] = torch.cat(vals, dim=0)
-                else:
-                    result[key] = vals
+                result[key] = pad_and_stack([item[key] for item in batch])
 
         return result
 
