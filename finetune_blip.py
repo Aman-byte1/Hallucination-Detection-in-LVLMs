@@ -171,12 +171,15 @@ class BLIPSHROOMDataset(TorchDataset):
             return_tensors="pt",
         )
 
-        # Replace pad tokens with -100 for loss masking
-        label_ids = labels["input_ids"].clone()
-        label_ids[label_ids == self.processor.tokenizer.pad_token_id] = -100
-
         # Squeeze batch dimension
         item = {k: v.squeeze(0) for k, v in encoding.items()}
+
+        # decoder_input_ids keeps real token IDs (used for embedding lookup)
+        item["decoder_input_ids"] = labels["input_ids"].squeeze(0)
+
+        # labels uses -100 for padding (only used for loss computation)
+        label_ids = labels["input_ids"].clone()
+        label_ids[label_ids == self.processor.tokenizer.pad_token_id] = -100
         item["labels"] = label_ids.squeeze(0)
 
         return item
