@@ -407,16 +407,23 @@ def run_inference(model, processor_or_tokenizer, sample, max_new_tokens=512):
                 ],
             },
         ]
+        downsample_mode = "16x"
         inputs = processor_or_tokenizer.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,
             return_dict=True,
             return_tensors="pt",
+            downsample_mode=downsample_mode,
+            max_slice_nums=1,
         ).to(model.device)
 
         with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
+            generated_ids = model.generate(
+                **inputs,
+                downsample_mode=downsample_mode,
+                max_new_tokens=max_new_tokens,
+            )
 
         in_len = inputs["input_ids"].shape[1]
         trimmed_ids = generated_ids[:, in_len:]
