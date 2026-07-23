@@ -327,16 +327,27 @@ class MiniCPMV46DataCollator:
             "labels": torch.stack(labels_list),
         }
 
-        # Collect pixel_values if present — these may have variable shapes
-        # so we pass them as a list rather than stacking
+        # Stack vision tensors (pixel_values, image_sizes, etc.) so model.forward receives Tensors
         if "pixel_values" in batch[0]:
-            result["pixel_values"] = [item["pixel_values"] for item in batch]
+            pvs = [item["pixel_values"] for item in batch]
+            if isinstance(pvs[0], torch.Tensor):
+                try:
+                    result["pixel_values"] = torch.stack(pvs)
+                except Exception:
+                    result["pixel_values"] = torch.cat(pvs, dim=0)
+            else:
+                result["pixel_values"] = pvs
 
-        # Pass through other vision keys as lists
-        for key in ["image_sizes", "image_bound", "tgt_sizes",
-                     "pixel_values_videos"]:
+        for key in ["image_sizes", "image_bound", "tgt_sizes", "pixel_values_videos"]:
             if key in batch[0]:
-                result[key] = [item[key] for item in batch]
+                vals = [item[key] for item in batch]
+                if isinstance(vals[0], torch.Tensor):
+                    try:
+                        result[key] = torch.stack(vals)
+                    except Exception:
+                        result[key] = torch.cat(vals, dim=0)
+                else:
+                    result[key] = vals
 
         return result
 
