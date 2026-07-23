@@ -28,8 +28,12 @@ import argparse
 import json
 import logging
 import os
+import sys
 import urllib.parse
 from pathlib import Path
+
+# Bypass broken system torchaudio build in container if present
+sys.modules["torchaudio"] = None
 
 import numpy as np
 import torch

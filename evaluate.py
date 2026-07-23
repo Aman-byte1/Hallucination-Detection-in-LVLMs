@@ -26,6 +26,9 @@ import sys
 import time
 from pathlib import Path
 
+# Bypass broken system torchaudio build in container if present
+sys.modules["torchaudio"] = None
+
 import numpy as np
 import torch
 from scipy.stats import pearsonr

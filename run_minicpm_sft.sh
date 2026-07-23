@@ -72,6 +72,9 @@ fi
 source venv_vqa/bin/activate
 echo "  Activated venv_vqa (Python: $(python --version))"
 
+# Uninstall broken system torchaudio if present to prevent ABI symbol errors in transformers
+pip uninstall -y torchaudio 2>/dev/null || true
+
 # Install uv for ultra-fast dependency resolution
 pip install uv --quiet 2>/dev/null || true
 
