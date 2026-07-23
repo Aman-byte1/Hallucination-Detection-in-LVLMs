@@ -163,14 +163,13 @@ class BLIPSHROOMDataset(TorchDataset):
         )
 
         # Process answer/labels
-        with self.processor.tokenizer.as_target_tokenizer():
-            labels = self.processor.tokenizer(
-                target,
-                padding="max_length",
-                truncation=True,
-                max_length=self.max_answer_length,
-                return_tensors="pt",
-            )
+        labels = self.processor.tokenizer(
+            target,
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_answer_length,
+            return_tensors="pt",
+        )
 
         # Replace pad tokens with -100 for loss masking
         label_ids = labels["input_ids"].clone()
