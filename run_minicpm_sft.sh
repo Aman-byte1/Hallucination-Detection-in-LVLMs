@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# MiniCPM-V-2 SFT Pipeline for SHROOM-Visions on RunPod
+# MiniCPM-V-4.6 SFT Pipeline for SHROOM-Visions on RunPod
 # ============================================================================
 # Self-contained script — run on a fresh RunPod A40 instance.
 # Handles: clone → setup → download → train → push → evaluate.
@@ -36,7 +36,7 @@ SEED=42
 
 echo ""
 echo "============================================================"
-echo "  SHROOM-Visions SFT Pipeline — MiniCPM-V-2 (RunPod A40)"
+echo "  SHROOM-Visions SFT Pipeline — MiniCPM-V-4.6 (RunPod A40)"
 echo "============================================================"
 echo ""
 
@@ -146,7 +146,7 @@ echo "  ✓ Authenticated."
 # Step 5: SFT Finetuning
 # ============================================================================
 echo ""
-echo "[5/7] Starting MiniCPM-V-2 SFT..."
+echo "[5/7] Starting MiniCPM-V-4.6 SFT..."
 echo "  Model:      $MODEL_ID"
 echo "  Hub:        $HUB_MODEL_ID"
 echo "  Epochs:     $NUM_EPOCHS"
@@ -176,7 +176,7 @@ echo "  ✓ SFT complete."
 # Step 6: Evaluate finetuned model
 # ============================================================================
 echo ""
-echo "[6/7] Evaluating FINETUNED MiniCPM-V-2..."
+echo "[6/7] Evaluating FINETUNED MiniCPM-V-4.6..."
 
 python evaluate_minicpm.py \
   --model_id "${OUTPUT_DIR}/final"
@@ -187,7 +187,7 @@ echo "  ✓ Finetuned evaluation complete."
 # Step 7: Evaluate baseline (unfinetuned) model
 # ============================================================================
 echo ""
-echo "[7/7] Evaluating BASELINE MiniCPM-V-2..."
+echo "[7/7] Evaluating BASELINE MiniCPM-V-4.6..."
 
 # Save finetuned results
 if [ -d "outputs_minicpm" ]; then
@@ -204,7 +204,7 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  ✓ MiniCPM-V-2 Pipeline Complete!"
+echo "  ✓ MiniCPM-V-4.6 Pipeline Complete!"
 echo "============================================================"
 echo ""
 echo "  Finetuned: ${OUTPUT_DIR}/final"

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Finetune MiniCPM-V-2 on SHROOM-Visions Hallucination Detection
-================================================================
+Finetune MiniCPM-V-4.6 on SHROOM-Visions Hallucination Detection
+=================================================================
 Uses LoRA via peft for parameter-efficient finetuning on A40 GPU.
-MiniCPM-V-2 is a 3B multimodal model (SigLip-400M + MiniCPM-2.4B).
+MiniCPM-V-4.6 is a ~1B multimodal model (SigLIP2-400M + Qwen3.5-0.8B).
 
 The model learns to:
   1. Look at an image
@@ -18,7 +18,7 @@ Usage:
     python finetune_minicpm.py --push_to_hub --hub_token hf_xxx
 
     # Resume from checkpoint
-    python finetune_minicpm.py --resume_from_checkpoint ./checkpoints/minicpm-v2-shroom-sft/checkpoint-xxx
+    python finetune_minicpm.py --resume_from_checkpoint ./checkpoints/minicpm-v4.6-shroom-sft/checkpoint-xxx
 """
 
 import argparse
@@ -37,7 +37,6 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset as TorchDataset
-from datasets import Dataset
 
 # ============================================================================
 # Configuration
@@ -132,24 +131,21 @@ def build_user_prompt(sample: dict) -> str:
 
 
 # ============================================================================
-# MiniCPM-V-2 Dataset
+# MiniCPM-V-4.6 Dataset
 # ============================================================================
 
-class MiniCPMSHROOMDataset(TorchDataset):
-    """Prepare SHROOM samples for MiniCPM-V-2 training.
+class MiniCPMV46SHROOMDataset(TorchDataset):
+    """Prepare SHROOM samples for MiniCPM-V-4.6 training.
 
-    MiniCPM-V-2 uses a conversation format with <image> tokens.
-    This dataset handles tokenization, image processing, and label masking.
+    MiniCPM-V-4.6 uses AutoProcessor with apply_chat_template.
+    This dataset prepares conversations and tokenizes them for training.
     """
 
-    def __init__(self, samples, tokenizer, transform, images_dir,
-                 max_length=2048, slice_mode=False):
+    def __init__(self, samples, processor, images_dir, max_length=2048):
         self.samples = samples
-        self.tokenizer = tokenizer
-        self.transform = transform
+        self.processor = processor
         self.images_dir = Path(images_dir)
         self.max_length = max_length
-        self.slice_mode = slice_mode
 
     def __len__(self):
         return len(self.samples)
@@ -183,76 +179,118 @@ class MiniCPMSHROOMDataset(TorchDataset):
         # Load image
         image = self._load_image(sample.get("image_name", ""))
 
-        # Format as MiniCPM-V-2 conversation
-        # System prompt + user message with image + assistant response
-        conversation = (
-            f"<s>{SYSTEM_PROMPT}\n"
-            f"<用户><image_placeholder>{user_text}\n"
-            f"<AI>{target}</s>"
-        )
+        # Build messages in chat format
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_text},
+                ],
+            },
+            {"role": "assistant", "content": target},
+        ]
 
-        # Tokenize the full conversation
-        tokenized = self.tokenizer(
-            conversation,
-            truncation=True,
-            max_length=self.max_length,
-            padding=False,
-            return_tensors=None,
-        )
+        # Tokenize using processor.apply_chat_template
+        try:
+            inputs = self.processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_dict=True,
+                return_tensors="pt",
+                max_slice_nums=1,  # Keep small for training efficiency
+            )
+        except Exception as e:
+            logger.warning(f"Error tokenizing sample {idx}: {e}, using fallback")
+            # Fallback: tokenize text-only
+            full_text = f"{SYSTEM_PROMPT}\n{user_text}\n{target}"
+            tokenized = self.processor.tokenizer(
+                full_text,
+                truncation=True,
+                max_length=self.max_length,
+                padding=False,
+                return_tensors="pt",
+            )
+            input_ids = tokenized["input_ids"].squeeze(0)
+            attention_mask = tokenized["attention_mask"].squeeze(0)
+            labels = input_ids.clone()
+            # Mask first 80% as approximate prompt
+            mask_len = int(len(labels) * 0.8)
+            labels[:mask_len] = -100
+            return {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+            }
 
-        input_ids = tokenized["input_ids"]
-        attention_mask = tokenized["attention_mask"]
+        # Extract tensors (squeeze batch dim from apply_chat_template)
+        input_ids = inputs["input_ids"].squeeze(0)
+        attention_mask = inputs["attention_mask"].squeeze(0)
 
-        # Create labels: mask everything before <AI> response
-        labels = copy.deepcopy(input_ids)
+        # Truncate to max_length
+        if len(input_ids) > self.max_length:
+            input_ids = input_ids[:self.max_length]
+            attention_mask = attention_mask[:self.max_length]
 
-        # Find the position of the assistant response start
-        # We mask everything before the target (the model should only predict the answer)
-        target_tokens = self.tokenizer(target, add_special_tokens=False)["input_ids"]
-        eos_tokens = self.tokenizer("</s>", add_special_tokens=False)["input_ids"]
+        # Create labels: mask everything before assistant response
+        labels = input_ids.clone()
 
-        # Find where target starts in input_ids
+        # Find where the target/assistant response starts
+        target_tokens = self.processor.tokenizer(
+            target, add_special_tokens=False
+        )["input_ids"]
+
         target_start = None
-        for i in range(len(input_ids) - len(target_tokens)):
-            if input_ids[i:i + len(target_tokens)] == target_tokens:
+        target_len = len(target_tokens)
+        ids_list = input_ids.tolist()
+        for i in range(len(ids_list) - target_len + 1):
+            if ids_list[i:i + target_len] == target_tokens:
                 target_start = i
                 break
 
         if target_start is not None:
-            # Mask everything before the target
-            labels[:target_start] = [-100] * target_start
+            labels[:target_start] = -100
         else:
-            # Fallback: mask first 80% (approximate prompt)
+            # Fallback: mask first 80%
             mask_len = int(len(labels) * 0.8)
-            labels[:mask_len] = [-100] * mask_len
+            labels[:mask_len] = -100
 
-        # Process image
-        if self.transform is not None:
-            pixel_values = self.transform(image)
-        else:
-            pixel_values = torch.zeros(3, 224, 224)
-
-        return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
-            "pixel_values": pixel_values,
+        result = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
         }
 
+        # Include pixel_values / image_sizes if present
+        for key in ["pixel_values", "image_sizes", "image_bound",
+                     "tgt_sizes", "pixel_values_videos"]:
+            if key in inputs:
+                val = inputs[key]
+                if isinstance(val, torch.Tensor):
+                    result[key] = val.squeeze(0) if val.dim() > 1 else val
+                else:
+                    result[key] = val
 
-class MiniCPMDataCollator:
-    """Collate MiniCPM-V-2 training samples into batches.
+        return result
 
-    Handles padding of variable-length sequences and stacking pixel values.
+
+class MiniCPMV46DataCollator:
+    """Collate MiniCPM-V-4.6 training samples into batches.
+
+    Handles padding of variable-length sequences.
     """
 
-    def __init__(self, tokenizer, max_length=2048):
-        self.tokenizer = tokenizer
+    def __init__(self, processor, max_length=2048):
+        self.processor = processor
         self.max_length = max_length
-        self.pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+        self.pad_token_id = (
+            processor.tokenizer.pad_token_id
+            or processor.tokenizer.eos_token_id
+        )
 
     def __call__(self, batch):
-        # Find max length in batch
         max_len = min(
             max(len(item["input_ids"]) for item in batch),
             self.max_length,
@@ -261,7 +299,6 @@ class MiniCPMDataCollator:
         input_ids_list = []
         attention_mask_list = []
         labels_list = []
-        pixel_values_list = []
 
         for item in batch:
             ids = item["input_ids"][:max_len]
@@ -271,21 +308,37 @@ class MiniCPMDataCollator:
             # Pad to max_len
             pad_len = max_len - len(ids)
             if pad_len > 0:
-                ids = torch.cat([ids, torch.full((pad_len,), self.pad_token_id, dtype=torch.long)])
+                ids = torch.cat([
+                    ids,
+                    torch.full((pad_len,), self.pad_token_id, dtype=torch.long),
+                ])
                 mask = torch.cat([mask, torch.zeros(pad_len, dtype=torch.long)])
-                labs = torch.cat([labs, torch.full((pad_len,), -100, dtype=torch.long)])
+                labs = torch.cat([
+                    labs, torch.full((pad_len,), -100, dtype=torch.long),
+                ])
 
             input_ids_list.append(ids)
             attention_mask_list.append(mask)
             labels_list.append(labs)
-            pixel_values_list.append(item["pixel_values"])
 
-        return {
+        result = {
             "input_ids": torch.stack(input_ids_list),
             "attention_mask": torch.stack(attention_mask_list),
             "labels": torch.stack(labels_list),
-            "pixel_values": torch.stack(pixel_values_list),
         }
+
+        # Collect pixel_values if present — these may have variable shapes
+        # so we pass them as a list rather than stacking
+        if "pixel_values" in batch[0]:
+            result["pixel_values"] = [item["pixel_values"] for item in batch]
+
+        # Pass through other vision keys as lists
+        for key in ["image_sizes", "image_bound", "tgt_sizes",
+                     "pixel_values_videos"]:
+            if key in batch[0]:
+                result[key] = [item[key] for item in batch]
+
+        return result
 
 
 # ============================================================================
@@ -295,14 +348,13 @@ class MiniCPMDataCollator:
 def load_and_split_data(
     data_file: str,
     images_dir: str,
-    tokenizer,
-    transform,
+    processor,
     eval_ratio: float = 0.10,
     seed: int = 42,
     max_samples: int | None = None,
     max_length: int = 2048,
 ) -> tuple:
-    """Load SHROOM data, convert to MiniCPM format, split train/eval."""
+    """Load SHROOM data, convert to MiniCPM-V-4.6 format, split train/eval."""
     # Load raw JSONL
     raw_samples = []
     with open(data_file, "r", encoding="utf-8") as f:
@@ -328,11 +380,11 @@ def load_and_split_data(
     logger.info(f"Split: {len(train_samples)} train + {len(eval_samples)} eval")
 
     # Create datasets
-    train_dataset = MiniCPMSHROOMDataset(
-        train_samples, tokenizer, transform, images_dir, max_length
+    train_dataset = MiniCPMV46SHROOMDataset(
+        train_samples, processor, images_dir, max_length
     )
-    eval_dataset = MiniCPMSHROOMDataset(
-        eval_samples, tokenizer, transform, images_dir, max_length
+    eval_dataset = MiniCPMV46SHROOMDataset(
+        eval_samples, processor, images_dir, max_length
     )
 
     return train_dataset, eval_dataset
@@ -343,7 +395,7 @@ def load_and_split_data(
 # ============================================================================
 
 def load_model(model_id: str, lora_rank: int):
-    """Load MiniCPM-V-2 and apply LoRA adapters."""
+    """Load MiniCPM-V-4.6 and apply LoRA adapters."""
     from peft import LoraConfig, get_peft_model
 
     logger.info(f"Loading model: {model_id}")
@@ -362,43 +414,39 @@ def load_model(model_id: str, lora_rank: int):
         dtype = torch.float32
     logger.info(f"Using dtype: {dtype}")
 
-    # Load model
-    from transformers import AutoModel, AutoTokenizer
+    # Load model using the native transformers API for MiniCPM-V-4.6
+    from transformers import AutoModelForImageTextToText, AutoProcessor
 
-    model = AutoModel.from_pretrained(
+    model = AutoModelForImageTextToText.from_pretrained(
         model_id,
-        trust_remote_code=True,
         torch_dtype=dtype,
         device_map="auto",
+        trust_remote_code=True,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
+    processor = AutoProcessor.from_pretrained(
         model_id,
         trust_remote_code=True,
     )
 
     # Ensure pad token
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
-    # Get image transform from model (if available)
-    transform = None
-    if hasattr(model, 'transform'):
-        transform = model.transform
-    elif hasattr(model, 'image_transform'):
-        transform = model.image_transform
-
-    # Freeze vision encoder and resampler
-    if hasattr(model, 'vpm'):
-        for param in model.vpm.parameters():
+    # Freeze vision encoder
+    frozen_count = 0
+    for name, param in model.named_parameters():
+        # Freeze vision-related modules (keep LLM trainable via LoRA)
+        if any(vk in name.lower() for vk in [
+            "vision", "vpm", "visual", "resampler", "siglip",
+            "image_encoder", "img_processor",
+        ]):
             param.requires_grad = False
-        logger.info("Froze vision encoder (vpm)")
+            frozen_count += 1
 
-    if hasattr(model, 'resampler'):
-        for param in model.resampler.parameters():
-            param.requires_grad = False
-        logger.info("Froze resampler")
+    if frozen_count > 0:
+        logger.info(f"Froze {frozen_count} vision encoder parameters")
 
-    # Apply LoRA to LLM layers only
+    # Apply LoRA to LLM layers
     logger.info("Applying LoRA adapters to LLM layers...")
     lora_config = LoraConfig(
         r=lora_rank,
@@ -412,25 +460,19 @@ def load_model(model_id: str, lora_rank: int):
         task_type="CAUSAL_LM",
     )
 
-    # Apply LoRA to the LLM component
-    if hasattr(model, 'llm'):
-        model.llm = get_peft_model(model.llm, lora_config)
-        trainable = sum(p.numel() for p in model.llm.parameters() if p.requires_grad)
-        total = sum(p.numel() for p in model.llm.parameters())
-    else:
-        model = get_peft_model(model, lora_config)
-        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        total = sum(p.numel() for p in model.parameters())
+    model = get_peft_model(model, lora_config)
 
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
     logger.info(
         f"Trainable params: {trainable:,} / {total:,} "
         f"({100 * trainable / total:.2f}%)"
     )
 
-    return model, tokenizer, transform
+    return model, processor
 
 
-def train(model, tokenizer, train_dataset, eval_dataset, args):
+def train(model, processor, train_dataset, eval_dataset, args):
     """Run SFT training."""
     from transformers import TrainingArguments, Trainer
 
@@ -478,7 +520,7 @@ def train(model, tokenizer, train_dataset, eval_dataset, args):
         remove_unused_columns=False,
     )
 
-    collator = MiniCPMDataCollator(tokenizer, max_length=args.max_seq_length)
+    collator = MiniCPMV46DataCollator(processor, max_length=args.max_seq_length)
 
     trainer = Trainer(
         model=model,
@@ -497,44 +539,48 @@ def train(model, tokenizer, train_dataset, eval_dataset, args):
     return trainer
 
 
-def save_and_upload(model, tokenizer, args):
+def save_and_upload(model, processor, args):
     """Save the finetuned model and optionally push to HuggingFace."""
     # Save locally
     save_dir = os.path.join(args.output_dir, "final")
     logger.info(f"Saving model to {save_dir}")
 
-    # If LoRA was applied to model.llm, save the full model
-    if hasattr(model, 'llm') and hasattr(model.llm, 'save_pretrained'):
-        # Save LoRA adapters
-        lora_dir = os.path.join(args.output_dir, "lora_adapters")
-        model.llm.save_pretrained(lora_dir)
-        tokenizer.save_pretrained(lora_dir)
-        logger.info(f"LoRA adapters saved to {lora_dir}")
+    # Save LoRA adapters
+    lora_dir = os.path.join(args.output_dir, "lora_adapters")
+    model.save_pretrained(lora_dir)
+    processor.save_pretrained(lora_dir)
+    logger.info(f"LoRA adapters saved to {lora_dir}")
 
-        # Merge and save
-        merged = model.llm.merge_and_unload()
-        model.llm = merged
-        model.save_pretrained(save_dir, trust_remote_code=True)
-        tokenizer.save_pretrained(save_dir)
+    # Merge LoRA and save full model
+    try:
+        merged_model = model.merge_and_unload()
+        merged_model.save_pretrained(save_dir, safe_serialization=True)
+        processor.save_pretrained(save_dir)
         logger.info(f"Merged model saved to {save_dir}")
-    else:
+    except Exception as e:
+        logger.warning(f"Could not merge LoRA: {e}. Saving adapter only.")
         model.save_pretrained(save_dir)
-        tokenizer.save_pretrained(save_dir)
+        processor.save_pretrained(save_dir)
 
     # Push to Hub
     if args.push_to_hub:
         logger.info(f"Pushing to HuggingFace: {args.hub_model_id}")
-        model.push_to_hub(
-            args.hub_model_id,
-            token=args.hub_token,
-            private=False,
-            trust_remote_code=True,
-        )
-        tokenizer.push_to_hub(
-            args.hub_model_id,
-            token=args.hub_token,
-        )
-        logger.info(f"✓ Model uploaded to https://huggingface.co/{args.hub_model_id}")
+        try:
+            model.push_to_hub(
+                args.hub_model_id,
+                token=args.hub_token,
+                private=False,
+            )
+            processor.push_to_hub(
+                args.hub_model_id,
+                token=args.hub_token,
+            )
+            logger.info(
+                f"✓ Model uploaded to https://huggingface.co/{args.hub_model_id}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to push to hub: {e}")
+            logger.info("You can manually push later from the saved checkpoint.")
 
 
 # ============================================================================
@@ -543,7 +589,7 @@ def save_and_upload(model, tokenizer, args):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Finetune MiniCPM-V-2 on SHROOM hallucination detection"
+        description="Finetune MiniCPM-V-4.6 on SHROOM hallucination detection"
     )
 
     # Data
@@ -557,14 +603,14 @@ def parse_args():
 
     # Model
     parser.add_argument(
-        "--model_id", default="openbmb/MiniCPM-V-2",
+        "--model_id", default="openbmb/MiniCPM-V-4.6",
         help="HuggingFace model ID",
     )
     parser.add_argument("--lora_rank", type=int, default=16)
     parser.add_argument("--max_seq_length", type=int, default=2048)
 
     # Training
-    parser.add_argument("--num_epochs", type=int, default=3)
+    parser.add_argument("--num_epochs", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--grad_accum", type=int, default=4)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -572,11 +618,11 @@ def parse_args():
 
     # Output
     parser.add_argument(
-        "--output_dir", default="./checkpoints/minicpm-v2-shroom-sft",
+        "--output_dir", default="./checkpoints/minicpm-v4.6-shroom-sft",
     )
     parser.add_argument("--push_to_hub", action="store_true")
     parser.add_argument(
-        "--hub_model_id", default="amanuelbyte/MiniCPM-V-2-SHROOM-SFT",
+        "--hub_model_id", default="amanuelbyte/MiniCPM-V-4.6-SHROOM-SFT",
     )
     parser.add_argument("--hub_token", default=None)
     parser.add_argument("--resume_from_checkpoint", default=None)
@@ -588,7 +634,7 @@ def main():
     args = parse_args()
 
     logger.info("=" * 60)
-    logger.info("  SHROOM-Visions SFT: MiniCPM-V-2")
+    logger.info("  SHROOM-Visions SFT: MiniCPM-V-4.6")
     logger.info("=" * 60)
     logger.info(f"Model:      {args.model_id}")
     logger.info(f"Data:       {args.data_file}")
@@ -603,7 +649,7 @@ def main():
 
     # ---- Step 1: Load model ----
     logger.info("\n[1/4] Loading model...")
-    model, tokenizer, transform = load_model(
+    model, processor = load_model(
         model_id=args.model_id,
         lora_rank=args.lora_rank,
     )
@@ -613,8 +659,7 @@ def main():
     train_dataset, eval_dataset = load_and_split_data(
         data_file=args.data_file,
         images_dir=args.images_dir,
-        tokenizer=tokenizer,
-        transform=transform,
+        processor=processor,
         eval_ratio=args.eval_ratio,
         seed=args.seed,
         max_samples=args.max_samples,
@@ -623,14 +668,14 @@ def main():
 
     # ---- Step 3: Train ----
     logger.info("\n[3/4] Training...")
-    trainer = train(model, tokenizer, train_dataset, eval_dataset, args)
+    trainer = train(model, processor, train_dataset, eval_dataset, args)
 
     # ---- Step 4: Save & Upload ----
     logger.info("\n[4/4] Saving and uploading...")
-    save_and_upload(model, tokenizer, args)
+    save_and_upload(model, processor, args)
 
     logger.info("\n" + "=" * 60)
-    logger.info("  ✓ MiniCPM-V-2 Finetuning complete!")
+    logger.info("  ✓ MiniCPM-V-4.6 Finetuning complete!")
     logger.info("=" * 60)
 
     # Print final metrics

@@ -5,7 +5,7 @@
 
 # Core ML
 torch>=2.4.0
-transformers>=4.40.0
+transformers>=5.7.0
 accelerate
 datasets
 
