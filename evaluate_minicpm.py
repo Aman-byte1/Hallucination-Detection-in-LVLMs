@@ -310,8 +310,8 @@ def parse_model_output(output_text, response_text=""):
 # ============================================================================
 
 def load_model(model_id: str):
-    """Load MiniCPM-V-2 for evaluation."""
-    from transformers import AutoModel, AutoTokenizer
+    """Load MiniCPM-V (v4.6 or legacy v2) for evaluation."""
+    from transformers import AutoModelForImageTextToText, AutoProcessor, AutoModel, AutoTokenizer
 
     logger.info(f"Loading model: {model_id}")
     logger.info(f"CUDA available: {torch.cuda.is_available()}")
@@ -327,23 +327,39 @@ def load_model(model_id: str):
         dtype = torch.float32
     logger.info(f"Using dtype: {dtype}")
 
-    model = AutoModel.from_pretrained(
-        model_id,
-        trust_remote_code=True,
-        torch_dtype=dtype,
-        device_map="auto",
-    )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_id,
-        trust_remote_code=True,
-    )
-    model.eval()
-    logger.info("Model loaded successfully")
-    return model, tokenizer
+    try:
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+        processor = AutoProcessor.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+        )
+        model.eval()
+        logger.info("Model loaded with AutoModelForImageTextToText & AutoProcessor")
+        return model, processor
+    except Exception as e:
+        logger.info(f"AutoModelForImageTextToText load failed: {e}. Trying legacy AutoModel...")
+        model = AutoModel.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+            torch_dtype=dtype,
+            device_map="auto",
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+        )
+        model.eval()
+        logger.info("Model loaded with legacy AutoModel & AutoTokenizer")
+        return model, tokenizer
 
 
-def run_inference(model, tokenizer, sample, max_new_tokens=512):
-    """Run hallucination detection inference using MiniCPM-V-2's chat API."""
+def run_inference(model, processor_or_tokenizer, sample, max_new_tokens=512):
+    """Run hallucination detection inference for MiniCPM-V (v4.6 or v2)."""
     from PIL import Image
 
     image_name = sample.get("image_name", "")
@@ -356,25 +372,58 @@ def run_inference(model, tokenizer, sample, max_new_tokens=512):
             except Exception as e:
                 logger.warning(f"Error opening image {image_path}: {e}")
 
-    # Build message for MiniCPM-V-2
-    user_prompt = f"{SYSTEM_PROMPT}\n{build_user_prompt(sample)}"
+    if image is None:
+        image = Image.new("RGB", (224, 224), (128, 128, 128))
 
-    msgs = [{"role": "user", "content": user_prompt}]
+    user_text = build_user_prompt(sample)
 
+    # 1. Legacy MiniCPM-V-2 model.chat() interface
+    if hasattr(model, "chat"):
+        user_prompt = f"{SYSTEM_PROMPT}\n{user_text}"
+        msgs = [{"role": "user", "content": user_prompt}]
+        try:
+            response = model.chat(
+                image=image,
+                msgs=msgs,
+                tokenizer=processor_or_tokenizer,
+                sampling=False,
+                max_new_tokens=max_new_tokens,
+            )
+            if isinstance(response, tuple):
+                response = response[0]
+            return str(response).strip()
+        except Exception as e:
+            logger.warning(f"Legacy model.chat error: {e}")
+
+    # 2. Native MiniCPM-V-4.6 transformers generate interface
     try:
-        # MiniCPM-V-2 uses model.chat() for inference
-        response = model.chat(
-            image=image,
-            msgs=msgs,
-            tokenizer=tokenizer,
-            sampling=False,  # Greedy decoding
-            max_new_tokens=max_new_tokens,
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_text},
+                ],
+            },
+        ]
+        inputs = processor_or_tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(model.device)
+
+        with torch.no_grad():
+            generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
+
+        in_len = inputs["input_ids"].shape[1]
+        trimmed_ids = generated_ids[:, in_len:]
+        output_text = processor_or_tokenizer.batch_decode(
+            trimmed_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
-
-        if isinstance(response, tuple):
-            response = response[0]
-
-        return str(response).strip()
+        return output_text[0].strip()
 
     except Exception as e:
         logger.warning(f"Inference error: {e}")
