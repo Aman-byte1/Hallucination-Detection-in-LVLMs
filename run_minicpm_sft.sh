@@ -23,10 +23,10 @@ DATA_URL="https://a3s.fi/mickusti-2007780-pub/shroom-visions-data.zip"
 IMAGES_URL="https://a3s.fi/mickusti-2007780-pub/shroom-visions-images.tar.gz"
 
 # Training config (A40 48GB)
-MODEL_ID="openbmb/MiniCPM-V-2"
-HUB_MODEL_ID="amanuelbyte/MiniCPM-V-2-SHROOM-SFT"
-OUTPUT_DIR="./checkpoints/minicpm-v2-shroom-sft"
-NUM_EPOCHS=3
+MODEL_ID="${MODEL_ID:-openbmb/MiniCPM-V-4.6}"
+HUB_MODEL_ID="${HUB_MODEL_ID:-amanuelbyte/MiniCPM-V-4.6-SHROOM-SFT}"
+OUTPUT_DIR="./checkpoints/minicpm-v4.6-shroom-sft"
+NUM_EPOCHS=2
 BATCH_SIZE=2
 GRAD_ACCUM=4
 LR="2e-4"
