@@ -263,13 +263,11 @@ class MiniCPMV46SHROOMDataset(TorchDataset):
             "labels": labels,
         }
 
-        # Include pixel_values / image_sizes if present
-        for key in ["pixel_values", "image_sizes", "image_bound",
-                     "tgt_sizes", "pixel_values_videos"]:
-            if key in inputs:
-                val = inputs[key]
+        # Include all extra vision keys from inputs (pixel_values, image_sizes, tgt_sizes, etc.)
+        for key, val in inputs.items():
+            if key not in ["input_ids", "attention_mask"]:
                 if isinstance(val, torch.Tensor):
-                    result[key] = val.squeeze(0) if val.dim() > 1 else val
+                    result[key] = val.squeeze(0) if (val.dim() > 1 and val.shape[0] == 1) else val
                 else:
                     result[key] = val
 
@@ -327,30 +325,37 @@ class MiniCPMV46DataCollator:
             "labels": torch.stack(labels_list),
         }
 
-        # Helper to stack vision tensors, padding if shapes differ due to dynamic image slicing
-        def pad_and_stack(tensor_list):
-            if not isinstance(tensor_list[0], torch.Tensor):
-                return tensor_list
-            try:
-                return torch.stack(tensor_list)
-            except RuntimeError:
-                # Pad variable shapes to max size across batch
-                max_dims = [max(t.shape[i] for t in tensor_list) for i in range(tensor_list[0].dim())]
-                padded = []
-                for t in tensor_list:
-                    pad_amounts = []
-                    for i in reversed(range(t.dim())):
-                        pad_amounts.extend([0, max_dims[i] - t.shape[i]])
-                    padded.append(torch.nn.functional.pad(t, pad_amounts))
-                return torch.stack(padded)
+        # Helper to stack/convert vision tensors (pixel_values, image_sizes, tgt_sizes, etc.)
+        def pad_and_stack(vals):
+            if not vals:
+                return None
+            first = vals[0]
+            if isinstance(first, torch.Tensor):
+                try:
+                    return torch.stack(vals)
+                except RuntimeError:
+                    # Pad variable shapes to max size across batch
+                    max_dims = [max(t.shape[i] for t in vals) for i in range(first.dim())]
+                    padded = []
+                    for t in vals:
+                        pad_amounts = []
+                        for i in reversed(range(t.dim())):
+                            pad_amounts.extend([0, max_dims[i] - t.shape[i]])
+                        padded.append(torch.nn.functional.pad(t, pad_amounts))
+                    return torch.stack(padded)
+            elif isinstance(first, (list, tuple)) and len(first) > 0 and isinstance(first[0], (int, float)):
+                return torch.tensor(vals, dtype=torch.long)
+            elif isinstance(first, (int, float)):
+                return torch.tensor(vals)
+            else:
+                return vals
 
-        # Stack vision tensors so model.forward receives Tensors
-        if "pixel_values" in batch[0]:
-            result["pixel_values"] = pad_and_stack([item["pixel_values"] for item in batch])
-
-        for key in ["image_sizes", "image_bound", "tgt_sizes", "pixel_values_videos"]:
-            if key in batch[0]:
-                result[key] = pad_and_stack([item[key] for item in batch])
+        # Collate all extra vision keys
+        extra_keys = set(batch[0].keys()) - {"input_ids", "attention_mask", "labels"}
+        for key in extra_keys:
+            key_vals = [item[key] for item in batch if key in item]
+            if len(key_vals) == len(batch):
+                result[key] = pad_and_stack(key_vals)
 
         return result
 
