@@ -117,25 +117,87 @@ def run_ensemble(args):
     w1, w2 = w1 / total_w, w2 / total_w
 
     ensemble_metrics = []
-    ensemble_jsonl = []
-
+    # Cache fused probability vectors per sample
+    cached_fused_samples = []
     for sample_id in common_ids:
         p1 = spancalib_preds[sample_id]
         p2 = vlm_preds[sample_id]
-
         response_text = p1["response"]
         resp_len = len(response_text)
         gold_labels = p1["gold_labels"]
 
-        # Character probability vectors
         probs1 = labels_to_char_probs(p1.get("pred_labels", []), resp_len)
         probs2 = labels_to_char_probs(p2.get("pred_labels", []), resp_len)
 
-        # Weighted Character Probability Fusion
         fused_probs = w1 * probs1 + w2 * probs2
+        cached_fused_samples.append({
+            "id": sample_id,
+            "prompt": p1.get("prompt", ""),
+            "response": response_text,
+            "gold_labels": gold_labels,
+            "fused_probs": fused_probs,
+        })
 
-        # Reconstruct Ensembled Spans
-        ens_spans = probs_to_contiguous_spans(fused_probs, threshold=args.threshold)
+    # Threshold Grid Search
+    threshold_grid = [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+    best_t_iou = -1.0
+    best_t = args.threshold
+    grid_results = []
+
+    n_total = len(cached_fused_samples)
+    n_gold_halluc = sum(1 for item in cached_fused_samples if len(item["gold_labels"]) > 0)
+    n_clean = n_total - n_gold_halluc
+
+    for t in threshold_grid:
+        t_ious = []
+        t_halluc_ious = []
+        t_clean_ious = []
+        t_clean_corr = 0
+        t_halluc_corr = 0
+
+        for item in cached_fused_samples:
+            resp_len = len(item["response"])
+            g_labels = item["gold_labels"]
+            ens_spans = probs_to_contiguous_spans(item["fused_probs"], threshold=t)
+            iou = compute_iou(g_labels, ens_spans, resp_len)
+            t_ious.append(iou)
+
+            has_g = len(g_labels) > 0
+            has_p = len(ens_spans) > 0
+
+            if has_g:
+                t_halluc_ious.append(iou)
+                if has_p:
+                    t_halluc_corr += 1
+            else:
+                t_clean_ious.append(iou)
+                if not has_p:
+                    t_clean_corr += 1
+
+        mean_iou = float(np.mean(t_ious))
+        grid_results.append([
+            f"{t:.2f}",
+            f"{mean_iou:.3f}",
+            f"{np.mean(t_halluc_ious):.3f}" if t_halluc_ious else "0.0",
+            f"{np.mean(t_clean_ious):.3f}" if t_clean_ious else "0.0",
+            f"{(t_clean_corr + t_halluc_corr) / n_total:.3f}",
+            f"{t_clean_corr}/{n_clean}",
+            f"{t_halluc_corr}/{n_gold_halluc}",
+        ])
+
+        if mean_iou > best_t_iou:
+            best_t_iou = mean_iou
+            best_t = t
+
+    # Target threshold evaluation
+    ensemble_metrics = []
+    ensemble_jsonl = []
+
+    for item in cached_fused_samples:
+        response_text = item["response"]
+        resp_len = len(response_text)
+        gold_labels = item["gold_labels"]
+        ens_spans = probs_to_contiguous_spans(item["fused_probs"], threshold=args.threshold)
 
         iou = compute_iou(gold_labels, ens_spans, resp_len)
         cal = compute_calibration(gold_labels, ens_spans, resp_len)
@@ -144,19 +206,11 @@ def run_ensemble(args):
         has_p = len(ens_spans) > 0
 
         ensemble_metrics.append({
-            "id": sample_id,
-            "iou": iou,
-            "calibration": cal,
-            "has_gold": has_g,
-            "has_pred": has_p,
+            "id": item["id"], "iou": iou, "calibration": cal, "has_gold": has_g, "has_pred": has_p,
         })
-
         ensemble_jsonl.append({
-            "id": sample_id,
-            "prompt": p1.get("prompt", ""),
-            "response": response_text,
-            "gold_labels": gold_labels,
-            "pred_labels": ens_spans,
+            "id": item["id"], "prompt": item["prompt"], "response": response_text,
+            "gold_labels": gold_labels, "pred_labels": ens_spans,
         })
 
     # Summary Statistics
@@ -165,9 +219,6 @@ def run_ensemble(args):
     halluc_ious = [m["iou"] for m in ensemble_metrics if m["has_gold"]]
     clean_ious = [m["iou"] for m in ensemble_metrics if not m["has_gold"]]
 
-    n_total = len(ensemble_metrics)
-    n_gold_halluc = sum(1 for m in ensemble_metrics if m["has_gold"])
-    n_clean = n_total - n_gold_halluc
     n_correct_clean = sum(1 for m in ensemble_metrics if not m["has_gold"] and not m["has_pred"])
     n_correct_halluc = sum(1 for m in ensemble_metrics if m["has_gold"] and m["has_pred"])
 
@@ -191,8 +242,12 @@ def run_ensemble(args):
     print(f"  Eval Samples: {n_total} (Hallucinated: {n_gold_halluc}, Clean: {n_clean})")
     print("=" * 70)
 
+    print(f"\n🔍 Threshold Grid Search (Best threshold: {best_t:.2f} -> Peak Overall IoU: {best_t_iou:.3f}):")
+    print(tabulate(grid_results, headers=["Threshold", "Overall IoU", "Halluc IoU", "Clean IoU", "Det Acc", "Clean Correct", "Halluc Correct"], tablefmt="rounded_outline"))
+
     summary_table = [
         [f"Overall IoU (t={args.threshold:.2f})", f"{overall_iou:.3f}"],
+        ["Peak Overall IoU", f"{best_t_iou:.3f} (at t={best_t:.2f})"],
         ["Hallucinated IoU", f"{halluc_iou_val:.3f}"],
         ["Clean IoU", f"{clean_iou_val:.3f}"],
         ["Calibration Pearson", f"{mean_cal:.3f}"],
@@ -201,7 +256,7 @@ def run_ensemble(args):
         ["Halluc correct", f"{n_correct_halluc}/{n_gold_halluc} ({100*n_correct_halluc/n_gold_halluc:.1f}%)"],
     ]
 
-    print("\n🏆 Ensemble Benchmark Metrics:")
+    print(f"\n🏆 Ensemble Benchmark Metrics for selected threshold ({args.threshold:.2f}):")
     print(tabulate(summary_table, headers=["Metric", "Value"], tablefmt="rounded_outline"))
     print(f"\n📁 Ensembled predictions saved to: {output_file}")
     print("=" * 70)
