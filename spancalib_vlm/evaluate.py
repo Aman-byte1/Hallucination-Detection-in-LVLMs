@@ -271,16 +271,99 @@ def evaluate(args):
             "response_length": resp_len,
         })
 
+        # Save raw predictions per sample for threshold grid search
         predictions.append({
             "id": sample["id"],
             "prompt": prompt_text,
             "image_name": sample.get("image_name", ""),
             "response": response_text,
             "gold_labels": gold_labels,
-            "pred_labels": pred_labels,
+            "token_probs": pred_probs,
+            "token_cats": token_cats,
+            "adjusted_offsets": adjusted_offsets,
         })
 
-    # 4. Aggregate Metrics
+    # 4. Threshold Grid Search & Optimization
+    threshold_grid = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65]
+    best_t_iou = -1.0
+    best_t = args.threshold
+    grid_results = []
+
+    for t in threshold_grid:
+        t_ious = []
+        t_halluc_ious = []
+        t_clean_ious = []
+        t_clean_corr = 0
+        t_halluc_corr = 0
+
+        for p in predictions:
+            resp_len = len(p["response"])
+            g_labels = p["gold_labels"]
+            p_spans = reconstruct_spans_from_tokens(
+                token_probs=p["token_probs"],
+                token_cats=p["token_cats"],
+                offsets=p["adjusted_offsets"],
+                response_text=p["response"],
+                threshold=t,
+            )
+
+            iou = compute_iou(g_labels, p_spans, resp_len)
+            t_ious.append(iou)
+
+            has_g = len(g_labels) > 0
+            has_p = len(p_spans) > 0
+
+            if has_g:
+                t_halluc_ious.append(iou)
+                if has_p:
+                    t_halluc_corr += 1
+            else:
+                t_clean_ious.append(iou)
+                if not has_p:
+                    t_clean_corr += 1
+
+        mean_iou = float(np.mean(t_ious))
+        grid_results.append([
+            f"{t:.2f}",
+            f"{mean_iou:.3f}",
+            f"{np.mean(t_halluc_ious):.3f}" if t_halluc_ious else "0.0",
+            f"{np.mean(t_clean_ious):.3f}" if t_clean_ious else "0.0",
+            f"{(t_clean_corr + t_halluc_corr) / len(predictions):.3f}",
+            f"{t_clean_corr}/{n_clean}",
+            f"{t_halluc_corr}/{n_gold_halluc}",
+        ])
+
+        if mean_iou > best_t_iou:
+            best_t_iou = mean_iou
+            best_t = t
+
+    # Compute metrics for target threshold
+    per_sample_metrics = []
+    final_preds = []
+    for p in predictions:
+        resp_len = len(p["response"])
+        g_labels = p["gold_labels"]
+        p_spans = reconstruct_spans_from_tokens(
+            token_probs=p["token_probs"],
+            token_cats=p["token_cats"],
+            offsets=p["adjusted_offsets"],
+            response_text=p["response"],
+            threshold=args.threshold,
+        )
+        iou = compute_iou(g_labels, p_spans, resp_len)
+        cal = compute_calibration(g_labels, p_spans, resp_len)
+        per_sample_metrics.append({
+            "id": p["id"], "iou": iou, "calibration": cal,
+            "gold_span_count": len(g_labels), "pred_span_count": len(p_spans),
+            "has_gold_hallucination": len(g_labels) > 0,
+            "has_pred_hallucination": len(p_spans) > 0,
+        })
+        final_preds.append({
+            "id": p["id"], "prompt": p["prompt"], "image_name": p["image_name"],
+            "response": p["response"], "gold_labels": g_labels, "pred_labels": p_spans,
+        })
+
+    # 5. Aggregate Metrics
     iou_scores = [m["iou"] for m in per_sample_metrics]
     cal_scores = [m["calibration"] for m in per_sample_metrics if m["calibration"] is not None]
     halluc_iou = [m["iou"] for m in per_sample_metrics if m["has_gold_hallucination"]]
@@ -295,6 +378,8 @@ def evaluate(args):
     overall_results = {
         "model": args.model_id,
         "eval_samples": n_total,
+        "best_threshold_for_iou": best_t,
+        "best_overall_iou": best_t_iou,
         "metrics": {
             "overall": {
                 "iou_mean": float(np.mean(iou_scores)) if iou_scores else 0.0,
@@ -321,7 +406,7 @@ def evaluate(args):
         },
     }
 
-    # 5. Save Outputs
+    # 6. Save Outputs
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -329,7 +414,7 @@ def evaluate(args):
             "gold_span_count", "pred_span_count",
             "gold_labels_json", "pred_labels_json", "iou", "calibration",
         ])
-        for pred, m in zip(predictions, per_sample_metrics):
+        for pred, m in zip(final_preds, per_sample_metrics):
             writer.writerow([
                 pred["id"], pred["prompt"], pred["image_name"],
                 len(pred["response"]), m["gold_span_count"], m["pred_span_count"],
@@ -340,13 +425,13 @@ def evaluate(args):
             ])
 
     with open(predictions_jsonl_path, "w", encoding="utf-8") as f:
-        for pred in predictions:
+        for pred in final_preds:
             f.write(json.dumps(pred, ensure_ascii=False) + "\n")
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(overall_results, f, indent=2, ensure_ascii=False)
 
-    # 6. Print Standardized Table
+    # 7. Print Standardized Table & Grid Search Summary
     det_stats = overall_results["metrics"]["detection_stats"]
     overall_iou = overall_results["metrics"]["overall"]["iou_mean"]
     halluc_iou_val = overall_results["metrics"]["hallucinated_samples"]["iou_mean"]
@@ -360,8 +445,12 @@ def evaluate(args):
     print(f"  Time: {overall_results['timing']['total_seconds']:.1f}s")
     print("=" * 70)
 
+    print(f"\n🔍 Threshold Grid Search (Best threshold: {best_t:.2f} -> Overall IoU: {best_t_iou:.3f}):")
+    print(tabulate(grid_results, headers=["Threshold", "Overall IoU", "Halluc IoU", "Clean IoU", "Det Acc", "Clean Correct", "Halluc Correct"], tablefmt="rounded_outline"))
+
     summary_table = [
-        ["Overall IoU", f"{overall_iou:.3f}"],
+        [f"Overall IoU (t={args.threshold:.2f})", f"{overall_iou:.3f}"],
+        ["Peak Overall IoU", f"{best_t_iou:.3f} (at t={best_t:.2f})"],
         ["Hallucinated IoU", f"{halluc_iou_val:.3f}"],
         ["Clean IoU", f"{clean_iou_val:.3f}"],
         ["Detection Accuracy", f"{det_acc:.3f}"],
@@ -370,7 +459,7 @@ def evaluate(args):
         ["Halluc correct",
          f"{n_correct_halluc}/{n_gold_halluc} ({100*n_correct_halluc/n_gold_halluc:.1f}%)" if n_gold_halluc > 0 else "0/0"],
     ]
-    print("\n📊 Key Metrics:")
+    print(f"\n📊 Metrics for selected threshold ({args.threshold:.2f}):")
     print(tabulate(summary_table, headers=["Metric", "Value"], tablefmt="rounded_outline"))
     print(f"\n📁 Results saved to: {output_dir}")
     print("=" * 70)
