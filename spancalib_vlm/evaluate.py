@@ -180,6 +180,7 @@ def evaluate(args):
     # 1. Load Data
     all_samples = load_data(Path(args.data_file))
     eval_samples = split_eval_data(all_samples, ratio=0.10, seed=42)
+    images_dir = Path(args.images_dir)
 
     if args.max_samples and args.max_samples < len(eval_samples):
         eval_samples = eval_samples[:args.max_samples]
@@ -196,9 +197,15 @@ def evaluate(args):
         image_processor = SiglipImageProcessor.from_pretrained(args.vision_model_id)
 
     model = SpanCalibVLM(model_id=args.model_id, use_vision=args.use_vision)
-    checkpoint_file = Path(args.checkpoint_dir) / "best_model.pt"
-    if not checkpoint_file.exists():
-        checkpoint_file = Path(args.checkpoint_dir) / "final_model.pt"
+
+    checkpoint_arg = getattr(args, "checkpoint", None) or args.checkpoint_dir
+    checkpoint_path = Path(checkpoint_arg)
+    if checkpoint_path.is_file():
+        checkpoint_file = checkpoint_path
+    else:
+        checkpoint_file = checkpoint_path / "best_model.pt"
+        if not checkpoint_file.exists():
+            checkpoint_file = checkpoint_path / "final_model.pt"
 
     if checkpoint_file.exists():
         logger.info(f"Loading trained weights from {checkpoint_file}")
@@ -497,6 +504,7 @@ def parse_args():
     parser.add_argument("--model_id", default="xlm-roberta-base")
     parser.add_argument("--use_vision", action="store_true", help="Enable SigLIP-2 vision tower cross-attention fusion")
     parser.add_argument("--vision_model_id", default="google/siglip-base-patch16-224", help="SigLIP vision model ID")
+    parser.add_argument("--checkpoint", default=None, help="Direct path to checkpoint file (.pt) or checkpoint directory")
     parser.add_argument("--checkpoint_dir", default="./checkpoints/spancalib_vlm")
     parser.add_argument("--output_dir", default="./outputs_spancalib_vlm")
     parser.add_argument("--threshold", type=float, default=0.50)
