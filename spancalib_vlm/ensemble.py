@@ -129,7 +129,14 @@ def run_ensemble(args):
         probs1 = labels_to_char_probs(p1.get("pred_labels", []), resp_len)
         probs2 = labels_to_char_probs(p2.get("pred_labels", []), resp_len)
 
-        fused_probs = w1 * probs1 + w2 * probs2
+        if args.fusion_mode == "union_calibrated":
+            # Uses SpanCalib-VLM continuous probabilities guided by Qwen span agreement
+            fused_probs = np.where(probs2 > 0, np.maximum(probs1, 0.45), probs1 * 0.35)
+        elif args.fusion_mode == "intersection":
+            fused_probs = np.where((probs1 >= args.threshold) & (probs2 > 0), (w1 * probs1 + w2 * probs2), 0.0)
+        else:
+            fused_probs = w1 * probs1 + w2 * probs2
+
         cached_fused_samples.append({
             "id": sample_id,
             "prompt": p1.get("prompt", ""),
@@ -275,9 +282,10 @@ def parse_args():
         help="Path to VLM (Qwen/MiniCPM/BLIP) predictions JSONL",
     )
     parser.add_argument("--output_file", default="outputs_ensemble/predictions_en.jsonl")
+    parser.add_argument("--fusion_mode", choices=["weighted", "union_calibrated", "intersection"], default="union_calibrated")
     parser.add_argument("--weight_spancalib", type=float, default=0.55)
     parser.add_argument("--weight_vlm", type=float, default=0.45)
-    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--threshold", type=float, default=0.40)
     return parser.parse_args()
 
 
