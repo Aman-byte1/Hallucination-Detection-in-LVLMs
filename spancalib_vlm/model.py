@@ -170,13 +170,21 @@ class SpanCalibVLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        pixel_values: torch.Tensor | None = None,
         response_token_mask: torch.Tensor | None = None,
         binary_labels: torch.Tensor | None = None,
         prob_labels: torch.Tensor | None = None,
         category_labels: torch.Tensor | None = None,
     ) -> dict:
         outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
-        hidden_states = outputs.last_hidden_state  # [B, N, hidden_size]
+        text_hidden_states = outputs.last_hidden_state  # [B, N, hidden_size]
+
+        if self.use_vision and pixel_values is not None and self.vision_encoder is not None:
+            vision_outputs = self.vision_encoder(pixel_values=pixel_values)
+            vision_hidden_states = vision_outputs.last_hidden_state  # [B, num_patches, v_hidden]
+            hidden_states = self.vision_fusion(text_hidden_states, vision_hidden_states)
+        else:
+            hidden_states = text_hidden_states
 
         span_logits, pred_probs, cat_logits = self.head(hidden_states)
 

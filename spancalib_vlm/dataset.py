@@ -119,12 +119,21 @@ class SpanCalibDataset(TorchDataset):
         tokenizer_or_processor,
         images_dir: Path,
         max_length: int = 512,
+        use_vision: bool = False,
+        vision_model_id: str = "google/siglip-base-patch16-224",
     ):
         self.samples = samples
         self.tokenizer = getattr(tokenizer_or_processor, "tokenizer", tokenizer_or_processor)
         self.processor = tokenizer_or_processor
         self.images_dir = Path(images_dir)
         self.max_length = max_length
+        self.use_vision = use_vision
+
+        if use_vision:
+            from transformers import SiglipImageProcessor
+            self.image_processor = SiglipImageProcessor.from_pretrained(vision_model_id)
+        else:
+            self.image_processor = None
 
     def __len__(self):
         return len(self.samples)
@@ -135,10 +144,8 @@ class SpanCalibDataset(TorchDataset):
         prompt_text = sample["prompt"]
         labels = sample.get("labels", [])
 
-        # Format input text prompt for token classification
         formatted_prompt = f"Question: {prompt_text}\nResponse: {response_text}"
 
-        # Tokenize with offsets
         encoded = self.tokenizer(
             formatted_prompt,
             truncation=True,
@@ -151,12 +158,10 @@ class SpanCalibDataset(TorchDataset):
         attention_mask = encoded["attention_mask"].squeeze(0)
         offsets = encoded["offset_mapping"].squeeze(0).tolist()
 
-        # Locate response_text start offset in formatted_prompt
         resp_start_in_prompt = formatted_prompt.find(response_text)
         if resp_start_in_prompt == -1:
             resp_start_in_prompt = 0
 
-        # Adjust offsets relative to response_text
         adjusted_offsets = []
         response_token_mask = np.zeros(len(offsets), dtype=bool)
 
@@ -169,17 +174,30 @@ class SpanCalibDataset(TorchDataset):
             else:
                 adjusted_offsets.append((0, 0))
 
-        # Compute ground truth token targets
         bin_targets, prob_targets, cat_targets = map_char_spans_to_tokens(
             labels=labels,
             response_text=response_text,
             offset_mapping=adjusted_offsets,
         )
 
+        pixel_values = None
+        if self.use_vision and self.image_processor is not None:
+            img_name = sample.get("image_name", "")
+            img_path = find_image(img_name, self.images_dir)
+            if img_path and img_path.exists():
+                try:
+                    img = Image.open(img_path).convert("RGB")
+                except Exception:
+                    img = Image.new("RGB", (224, 224), (255, 255, 255))
+            else:
+                img = Image.new("RGB", (224, 224), (255, 255, 255))
+            pixel_values = self.image_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+
         return {
             "id": sample["id"],
             "input_ids": input_ids,
             "attention_mask": attention_mask,
+            "pixel_values": pixel_values,
             "response_token_mask": torch.tensor(response_token_mask, dtype=torch.bool),
             "binary_labels": torch.tensor(bin_targets, dtype=torch.float32),
             "prob_labels": torch.tensor(prob_targets, dtype=torch.float32),
@@ -204,6 +222,7 @@ class DataCollatorForSpanCalib:
         batch_bin_labels = []
         batch_prob_labels = []
         batch_cat_labels = []
+        batch_pixel_values = []
 
         ids_list = []
         gold_labels_list = []
@@ -213,7 +232,6 @@ class DataCollatorForSpanCalib:
             l = len(item["input_ids"])
             pad_len = max_len - l
 
-            # Pad tensors
             padded_ids = torch.cat([item["input_ids"], torch.full((pad_len,), self.pad_token_id, dtype=torch.long)])
             padded_att = torch.cat([item["attention_mask"], torch.zeros(pad_len, dtype=torch.long)])
             padded_resp = torch.cat([item["response_token_mask"], torch.zeros(pad_len, dtype=torch.bool)])
@@ -228,14 +246,20 @@ class DataCollatorForSpanCalib:
             batch_prob_labels.append(padded_prob)
             batch_cat_labels.append(padded_cat)
 
+            if item.get("pixel_values") is not None:
+                batch_pixel_values.append(item["pixel_values"])
+
             ids_list.append(item["id"])
             gold_labels_list.append(item.get("gold_labels", []))
             resp_texts.append(item.get("response_text", ""))
+
+        pixel_values_tensor = torch.stack(batch_pixel_values, dim=0) if batch_pixel_values else None
 
         return {
             "id": ids_list,
             "input_ids": torch.stack(batch_input_ids, dim=0),
             "attention_mask": torch.stack(batch_attention_mask, dim=0),
+            "pixel_values": pixel_values_tensor,
             "response_token_mask": torch.stack(batch_resp_mask, dim=0),
             "binary_labels": torch.stack(batch_bin_labels, dim=0),
             "prob_labels": torch.stack(batch_prob_labels, dim=0),

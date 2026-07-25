@@ -190,7 +190,12 @@ def evaluate(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
 
-    model = SpanCalibVLM(model_id=args.model_id)
+    image_processor = None
+    if args.use_vision:
+        from transformers import SiglipImageProcessor
+        image_processor = SiglipImageProcessor.from_pretrained(args.vision_model_id)
+
+    model = SpanCalibVLM(model_id=args.model_id, use_vision=args.use_vision)
     checkpoint_file = Path(args.checkpoint_dir) / "best_model.pt"
     if not checkpoint_file.exists():
         checkpoint_file = Path(args.checkpoint_dir) / "final_model.pt"
@@ -228,6 +233,19 @@ def evaluate(args):
         attention_mask = encoded["attention_mask"].to(device)
         offsets = encoded["offset_mapping"].squeeze(0).tolist()
 
+        pixel_values = None
+        if args.use_vision and image_processor is not None:
+            img_name = sample.get("image_name", "")
+            img_path = find_image(img_name, images_dir)
+            if img_path and img_path.exists():
+                try:
+                    img = Image.open(img_path).convert("RGB")
+                except Exception:
+                    img = Image.new("RGB", (224, 224), (255, 255, 255))
+            else:
+                img = Image.new("RGB", (224, 224), (255, 255, 255))
+            pixel_values = image_processor(images=img, return_tensors="pt")["pixel_values"].to(device)
+
         resp_start = formatted_prompt.find(response_text)
         if resp_start == -1:
             resp_start = 0
@@ -240,7 +258,7 @@ def evaluate(args):
                 adjusted_offsets.append((0, 0))
 
         with torch.no_grad():
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values)
             pred_probs = outputs["pred_probs"].squeeze(0).cpu().numpy()
             cat_logits = outputs["cat_logits"].squeeze(0).cpu().numpy()
             token_cats = cat_logits.argmax(axis=-1)
@@ -475,7 +493,10 @@ def parse_args():
         "--data_file",
         default="shroom-visions-data/distrib/shroom-vision.train.en.labeled.jsonl",
     )
+    parser.add_argument("--images_dir", default="shroom-vis-images")
     parser.add_argument("--model_id", default="xlm-roberta-base")
+    parser.add_argument("--use_vision", action="store_true", help="Enable SigLIP-2 vision tower cross-attention fusion")
+    parser.add_argument("--vision_model_id", default="google/siglip-base-patch16-224", help="SigLIP vision model ID")
     parser.add_argument("--checkpoint_dir", default="./checkpoints/spancalib_vlm")
     parser.add_argument("--output_dir", default="./outputs_spancalib_vlm")
     parser.add_argument("--threshold", type=float, default=0.50)

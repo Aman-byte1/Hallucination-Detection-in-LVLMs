@@ -70,6 +70,7 @@ def evaluate_val(model, val_loader, device):
         for batch in val_loader:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            pixel_values = batch["pixel_values"].to(device) if batch["pixel_values"] is not None else None
             resp_mask = batch["response_token_mask"].to(device)
             binary_labels = batch["binary_labels"].to(device)
             prob_labels = batch["prob_labels"].to(device)
@@ -78,6 +79,7 @@ def evaluate_val(model, val_loader, device):
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                pixel_values=pixel_values,
                 response_token_mask=resp_mask,
                 binary_labels=binary_labels,
                 prob_labels=prob_labels,
@@ -115,6 +117,8 @@ def parse_args():
     )
     parser.add_argument("--images_dir", default="shroom-vis-images")
     parser.add_argument("--model_id", default="xlm-roberta-base")
+    parser.add_argument("--use_vision", action="store_true", help="Enable SigLIP-2 vision tower cross-attention fusion")
+    parser.add_argument("--vision_model_id", default="google/siglip-base-patch16-224", help="SigLIP vision model ID")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=8)
@@ -132,6 +136,7 @@ def main():
     logger.info("  SpanCalib-VLM Training Pipeline")
     logger.info("=" * 60)
     logger.info(f"Model ID:   {args.model_id}")
+    logger.info(f"Vision:     {args.use_vision} ({args.vision_model_id if args.use_vision else 'None'})")
     logger.info(f"Epochs:     {args.epochs}")
     logger.info(f"Batch Size: {args.batch_size} × {args.grad_accum} = {args.batch_size * args.grad_accum}")
     logger.info(f"LR:         {args.lr}")
@@ -162,8 +167,8 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
     images_dir = Path(args.images_dir)
 
-    train_dataset = SpanCalibDataset(train_samples, tokenizer, images_dir)
-    val_dataset = SpanCalibDataset(val_samples, tokenizer, images_dir)
+    train_dataset = SpanCalibDataset(train_samples, tokenizer, images_dir, use_vision=args.use_vision, vision_model_id=args.vision_model_id)
+    val_dataset = SpanCalibDataset(val_samples, tokenizer, images_dir, use_vision=args.use_vision, vision_model_id=args.vision_model_id)
 
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 1
     collator = DataCollatorForSpanCalib(pad_token_id=pad_id)
@@ -175,7 +180,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    model = SpanCalibVLM(model_id=args.model_id)
+    model = SpanCalibVLM(model_id=args.model_id, use_vision=args.use_vision)
     model.to(device)
 
     # 4. Optimizer & Scheduler
@@ -200,6 +205,7 @@ def main():
         for step, batch in pbar:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            pixel_values = batch["pixel_values"].to(device) if batch["pixel_values"] is not None else None
             resp_mask = batch["response_token_mask"].to(device)
             binary_labels = batch["binary_labels"].to(device)
             prob_labels = batch["prob_labels"].to(device)
@@ -208,6 +214,7 @@ def main():
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                pixel_values=pixel_values,
                 response_token_mask=resp_mask,
                 binary_labels=binary_labels,
                 prob_labels=prob_labels,
