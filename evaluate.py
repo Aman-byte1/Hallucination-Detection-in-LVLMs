@@ -665,11 +665,12 @@ def evaluate(args):
     start_time = time.time()
 
     # ── Setup output directory ──
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = OUTPUT_DIR / "checkpoint.json"
-    csv_path = OUTPUT_DIR / "predictions_en.csv"
-    json_path = OUTPUT_DIR / "metrics_en.json"
-    predictions_jsonl_path = OUTPUT_DIR / "predictions_en.jsonl"
+    out_dir = Path(args.output_dir) if getattr(args, "output_dir", None) else OUTPUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = out_dir / "checkpoint.json"
+    csv_path = out_dir / "predictions_en.csv"
+    json_path = out_dir / "metrics_en.json"
+    predictions_jsonl_path = out_dir / "predictions_en.jsonl"
 
     # ── Load and split data ──
     logger.info("=" * 60)
@@ -1016,6 +1017,10 @@ Examples:
     parser.add_argument(
         "--no_think", action="store_true",
         help="Disable thinking mode (greedy output, no CoT reasoning chain).",
+    )
+    parser.add_argument(
+        "--output_dir", type=str, default=None,
+        help="Directory to save output files (default: outputs)",
     )
     parser.add_argument(
         "--resume", action="store_true",
