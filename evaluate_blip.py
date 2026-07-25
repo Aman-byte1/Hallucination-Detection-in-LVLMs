@@ -490,8 +490,15 @@ def evaluate(args):
     iou_scores = [m["iou"] for m in per_sample_metrics]
     cal_scores = [m["calibration"] for m in per_sample_metrics if m["calibration"] is not None]
 
+    # Hallucinated vs clean splits
+    halluc_iou = [m["iou"] for m in per_sample_metrics if m["has_gold_hallucination"]]
+    halluc_cal = [m["calibration"] for m in per_sample_metrics
+                  if m["has_gold_hallucination"] and m["calibration"] is not None]
+    clean_iou = [m["iou"] for m in per_sample_metrics if not m["has_gold_hallucination"]]
+
     n_total = len(per_sample_metrics)
     n_gold_halluc = sum(1 for m in per_sample_metrics if m["has_gold_hallucination"])
+    n_clean = n_total - n_gold_halluc
     n_pred_halluc = sum(1 for m in per_sample_metrics if m["has_pred_hallucination"])
     n_correct_clean = sum(1 for m in per_sample_metrics
                           if not m["has_gold_hallucination"] and not m["has_pred_hallucination"])
@@ -503,6 +510,8 @@ def evaluate(args):
         "model_family": "BLIP-VQA-Base",
         "language": "en",
         "eval_samples": n_total,
+        "eval_split_ratio": EVAL_SPLIT_RATIO,
+        "random_seed": RANDOM_SEED,
         "metrics": {
             "overall": {
                 "iou_mean": float(np.mean(iou_scores)) if iou_scores else 0.0,
@@ -511,11 +520,22 @@ def evaluate(args):
                 "calibration_mean": float(np.mean(cal_scores)) if cal_scores else 0.0,
                 "calibration_std": float(np.std(cal_scores)) if cal_scores else 0.0,
             },
+            "hallucinated_samples": {
+                "count": n_gold_halluc,
+                "iou_mean": float(np.mean(halluc_iou)) if halluc_iou else 0.0,
+                "calibration_mean": float(np.mean(halluc_cal)) if halluc_cal else 0.0,
+            },
+            "clean_samples": {
+                "count": n_clean,
+                "iou_mean": float(np.mean(clean_iou)) if clean_iou else 0.0,
+            },
             "detection_stats": {
                 "gold_has_hallucination": n_gold_halluc,
                 "pred_has_hallucination": n_pred_halluc,
                 "correct_clean": n_correct_clean,
+                "total_clean": n_clean,
                 "correct_halluc": n_correct_halluc,
+                "total_halluc": n_gold_halluc,
                 "detection_accuracy": (n_correct_clean + n_correct_halluc) / n_total if n_total > 0 else 0.0,
             },
             "per_category": {},
@@ -531,6 +551,7 @@ def evaluate(args):
             overall_results["metrics"]["per_category"][cat] = {
                 "sample_count": len(data["iou_list"]),
                 "iou_mean": float(np.mean(data["iou_list"])),
+                "calibration_mean": float(np.mean(data["cal_list"])) if data["cal_list"] else None,
             }
 
     # ── Save outputs ──
@@ -541,6 +562,7 @@ def evaluate(args):
             "gold_span_count", "pred_span_count",
             "gold_labels_json", "pred_labels_json",
             "iou", "calibration",
+            "has_gold_hallucination", "has_pred_hallucination",
         ])
         for pred, metrics in zip(ckpt["predictions"], per_sample_metrics):
             writer.writerow([
@@ -551,6 +573,8 @@ def evaluate(args):
                 json.dumps(pred["pred_labels"], ensure_ascii=False),
                 f"{metrics['iou']:.6f}",
                 f"{metrics['calibration']:.6f}" if metrics["calibration"] is not None else "",
+                metrics["has_gold_hallucination"],
+                metrics["has_pred_hallucination"],
             ])
 
     with open(predictions_jsonl_path, "w", encoding="utf-8") as f:
@@ -558,29 +582,38 @@ def evaluate(args):
             f.write(json.dumps({
                 "id": pred["id"], "pred_labels": pred["pred_labels"],
                 "gold_labels": pred["gold_labels"], "response": pred["response"],
+                "prompt": pred["prompt"], "image_name": pred["image_name"],
             }, ensure_ascii=False) + "\n")
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(overall_results, f, indent=2, ensure_ascii=False)
 
-    # ── Print summary ──
+    # ── Print standardized summary ──
+    det_stats = overall_results["metrics"]["detection_stats"]
+    overall_iou = overall_results["metrics"]["overall"]["iou_mean"]
+    halluc_iou_val = overall_results["metrics"]["hallucinated_samples"]["iou_mean"]
+    clean_iou_val = overall_results["metrics"]["clean_samples"]["iou_mean"]
+    det_acc = det_stats["detection_accuracy"]
+
     print("\n" + "=" * 70)
     print("  SHROOM-Visions Evaluation Summary — BLIP-VQA-Base")
     print(f"  Model: {args.model_id}")
-    print(f"  Eval Samples: {n_total}")
+    print(f"  Eval Samples: {n_total} (Hallucinated: {n_gold_halluc}, Clean: {n_clean})")
     print(f"  Time: {overall_results['timing']['total_seconds']:.1f}s")
     print("=" * 70)
 
-    print("\n📊 Overall Metrics:")
-    print(tabulate([
-        ["IoU (mean ± std)",
-         f"{overall_results['metrics']['overall']['iou_mean']:.4f} ± "
-         f"{overall_results['metrics']['overall']['iou_std']:.4f}"],
-        ["Calibration (mean)",
-         f"{overall_results['metrics']['overall']['calibration_mean']:.4f}"],
-        ["Detection Accuracy",
-         f"{overall_results['metrics']['detection_stats']['detection_accuracy']:.4f}"],
-    ], headers=["Metric", "Value"], tablefmt="rounded_outline"))
+    summary_table = [
+        ["Overall IoU", f"{overall_iou:.3f}"],
+        ["Hallucinated IoU", f"{halluc_iou_val:.3f}"],
+        ["Clean IoU", f"{clean_iou_val:.3f}"],
+        ["Detection Accuracy", f"{det_acc:.3f}"],
+        ["Clean correct",
+         f"{n_correct_clean}/{n_clean} ({100*n_correct_clean/n_clean:.1f}%)" if n_clean > 0 else "0/0"],
+        ["Halluc correct",
+         f"{n_correct_halluc}/{n_gold_halluc} ({100*n_correct_halluc/n_gold_halluc:.1f}%)" if n_gold_halluc > 0 else "0/0"],
+    ]
+    print("\n📊 Key Metrics:")
+    print(tabulate(summary_table, headers=["Metric", "Value"], tablefmt="rounded_outline"))
 
     if overall_results["metrics"]["per_category"]:
         cat_table = [[cat, d["sample_count"], f"{d['iou_mean']:.4f}"]

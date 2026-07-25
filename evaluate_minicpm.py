@@ -680,37 +680,34 @@ def evaluate(args):
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(overall_results, f, indent=2, ensure_ascii=False)
 
-    # ── Print summary ──
+    # ── Print standardized summary ──
+    det_stats = overall_results["metrics"]["detection_stats"]
+    overall_iou = overall_results["metrics"]["overall"]["iou_mean"]
+    halluc_iou_val = overall_results["metrics"]["hallucinated_samples"]["iou_mean"]
+    clean_iou_val = overall_results["metrics"]["clean_samples"]["iou_mean"]
+    det_acc = det_stats["detection_accuracy"]
+
     print("\n")
     print("=" * 70)
-    print("  SHROOM-Visions Evaluation Summary — MiniCPM-V-2")
+    print("  SHROOM-Visions Evaluation Summary — MiniCPM-V")
     print(f"  Model: {args.model_id}")
-    print(f"  Language: English | Eval Samples: {n_total}")
+    print(f"  Language: English | Eval Samples: {n_total} (Hallucinated: {n_gold_halluc}, Clean: {n_total - n_gold_halluc})")
     print(f"  Time: {overall_results['timing']['total_seconds']:.1f}s "
           f"({overall_results['timing']['samples_per_second']:.2f} samples/s)")
     print("=" * 70)
 
-    overall_table = [
-        ["Overall IoU (mean ± std)",
-         f"{overall_results['metrics']['overall']['iou_mean']:.4f} ± "
-         f"{overall_results['metrics']['overall']['iou_std']:.4f}"],
-        ["Overall IoU (median)",
-         f"{overall_results['metrics']['overall']['iou_median']:.4f}"],
-        ["Overall Calibration (mean ± std)",
-         f"{overall_results['metrics']['overall']['calibration_mean']:.4f} ± "
-         f"{overall_results['metrics']['overall']['calibration_std']:.4f}"],
+    summary_table = [
+        ["Overall IoU", f"{overall_iou:.3f}"],
+        ["Hallucinated IoU", f"{halluc_iou_val:.3f}"],
+        ["Clean IoU", f"{clean_iou_val:.3f}"],
+        ["Detection Accuracy", f"{det_acc:.3f}"],
+        ["Clean correct",
+         f"{n_correct_clean}/{n_total - n_gold_halluc} ({100*n_correct_clean/(n_total - n_gold_halluc):.1f}%)" if (n_total - n_gold_halluc) > 0 else "0/0"],
+        ["Halluc correct",
+         f"{n_correct_halluc}/{n_gold_halluc} ({100*n_correct_halluc/n_gold_halluc:.1f}%)" if n_gold_halluc > 0 else "0/0"],
     ]
-    print("\n📊 Overall Metrics:")
-    print(tabulate(overall_table, headers=["Metric", "Value"], tablefmt="rounded_outline"))
-
-    detect_table = [
-        ["Gold has hallucination", n_gold_halluc],
-        ["Predicted has hallucination", n_pred_halluc],
-        ["Detection Accuracy",
-         f"{overall_results['metrics']['detection_stats']['detection_accuracy']:.4f}"],
-    ]
-    print("\n🎯 Detection Statistics:")
-    print(tabulate(detect_table, headers=["Stat", "Value"], tablefmt="rounded_outline"))
+    print("\n📊 Key Metrics:")
+    print(tabulate(summary_table, headers=["Metric", "Value"], tablefmt="rounded_outline"))
 
     if overall_results["metrics"]["per_category"]:
         cat_table = []
