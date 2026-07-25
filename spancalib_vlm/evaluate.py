@@ -284,6 +284,10 @@ def evaluate(args):
         })
 
     # 4. Threshold Grid Search & Optimization
+    n_total = len(predictions)
+    n_gold_halluc = sum(1 for p in predictions if len(p["gold_labels"]) > 0)
+    n_clean = n_total - n_gold_halluc
+
     threshold_grid = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65]
     best_t_iou = -1.0
     best_t = args.threshold
