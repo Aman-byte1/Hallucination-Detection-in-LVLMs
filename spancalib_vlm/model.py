@@ -121,16 +121,44 @@ class SpanCalibHead(nn.Module):
         return span_logits, pred_probs, cat_logits
 
 
-class SpanCalibVLM(nn.Module):
-    """SpanCalib-VLM: Full Architecture."""
+class CrossAttentionVisionFusion(nn.Module):
+    """Cross-Attention fusion between text token representations and visual patch tokens."""
 
-    def __init__(self, model_id: str = "xlm-roberta-base", num_categories: int = 5):
+    def __init__(self, text_hidden_size: int, vision_hidden_size: int = 768, num_heads: int = 8):
+        super().__init__()
+        self.proj_v = nn.Linear(vision_hidden_size, text_hidden_size) if vision_hidden_size != text_hidden_size else nn.Identity()
+        self.cross_attn = nn.MultiheadAttention(embed_dim=text_hidden_size, num_heads=num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(text_hidden_size)
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, text_states: torch.Tensor, vision_states: torch.Tensor) -> torch.Tensor:
+        v_proj = self.proj_v(vision_states)
+        attn_out, _ = self.cross_attn(query=text_states, key=v_proj, value=v_proj)
+        fused = self.norm(text_states + self.dropout(attn_out))
+        return fused
+
+
+class SpanCalibVLM(nn.Module):
+    """SpanCalib-VLM: Full Architecture with optional Cross-Attention Vision Fusion."""
+
+    def __init__(self, model_id: str = "xlm-roberta-base", num_categories: int = 5, use_vision: bool = False):
         super().__init__()
         self.model_id = model_id
+        self.use_vision = use_vision
         self.config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
         self.backbone = AutoModel.from_pretrained(model_id, trust_remote_code=True)
 
         hidden_size = getattr(self.config, "hidden_size", getattr(self.config, "d_model", 768))
+
+        if use_vision:
+            from transformers import SiglipVisionModel
+            self.vision_encoder = SiglipVisionModel.from_pretrained("google/siglip-base-patch16-224")
+            v_hidden_size = self.vision_encoder.config.hidden_size
+            self.vision_fusion = CrossAttentionVisionFusion(text_hidden_size=hidden_size, vision_hidden_size=v_hidden_size)
+        else:
+            self.vision_encoder = None
+            self.vision_fusion = None
+
         self.head = SpanCalibHead(hidden_size=hidden_size, num_categories=num_categories)
 
         # Loss functions
