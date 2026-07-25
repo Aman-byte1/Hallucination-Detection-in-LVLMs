@@ -304,7 +304,24 @@ def parse_model_output(output_text, response_text=""):
                     except json.JSONDecodeError:
                         pass
 
-    if parsed is None:
+    # Robust regex extraction for truncated JSON strings (e.g. truncated mid-array)
+    if not parsed:
+        spans = []
+        matches = re.findall(r'"\s*text\s*"\s*:\s*"([^"]+)"', output_text, re.IGNORECASE)
+        for val in matches:
+            val_clean = val.strip()
+            if val_clean and val_clean.lower() not in ("yes", "no", "true", "false", "none", "null", "correct"):
+                spans.append({"text": val_clean, "label": "invention", "prob": 0.9})
+        if spans:
+            parsed = spans
+
+    # Fallback for plain text / single word outputs (e.g. 'blackberries', 'lime')
+    if not parsed:
+        cleaned_str = text.strip("'\" \t\n")
+        if cleaned_str and cleaned_str.lower() not in ("no", "none", "no errors", "no hallucinations", "correct", "[]", "{}", ""):
+            parsed = [{"text": cleaned_str, "label": "invention", "prob": 0.9}]
+
+    if not parsed:
         return []
 
     return resolve_labels(parsed, response_text)
