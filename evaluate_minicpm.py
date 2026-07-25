@@ -310,7 +310,7 @@ def parse_model_output(output_text, response_text=""):
 # ============================================================================
 
 def load_model(model_id: str):
-    """Load MiniCPM-V (v4.6 or legacy v2) for evaluation."""
+    """Load MiniCPM-V (v4.6 or legacy v2) for evaluation, supporting LoRA adapters."""
     from transformers import AutoModelForImageTextToText, AutoProcessor, AutoModel, AutoTokenizer
 
     logger.info(f"Loading model: {model_id}")
@@ -327,32 +327,59 @@ def load_model(model_id: str):
         dtype = torch.float32
     logger.info(f"Using dtype: {dtype}")
 
+    # Check if model_id is a PEFT adapter repo
+    is_peft = False
+    base_model_id = model_id
+    try:
+        from peft import PeftConfig
+        peft_config = PeftConfig.from_pretrained(model_id)
+        base_model_id = getattr(peft_config, "base_model_name_or_path", "openbmb/MiniCPM-V-4.6")
+        is_peft = True
+        logger.info(f"Detected PEFT LoRA adapter repo. Base model: {base_model_id}")
+    except Exception:
+        pass
+
     try:
         model = AutoModelForImageTextToText.from_pretrained(
-            model_id,
+            base_model_id,
             torch_dtype=dtype,
             device_map="auto",
             trust_remote_code=True,
         )
         processor = AutoProcessor.from_pretrained(
-            model_id,
+            model_id if not is_peft else base_model_id,
             trust_remote_code=True,
         )
+        if is_peft:
+            from peft import PeftModel
+            logger.info(f"Applying LoRA weights from {model_id}...")
+            model = PeftModel.from_pretrained(model, model_id)
+            try:
+                model = model.merge_and_unload()
+                logger.info("Successfully merged LoRA weights!")
+            except Exception:
+                logger.info("Loaded unmerged PeftModel")
+
         model.eval()
         logger.info("Model loaded with AutoModelForImageTextToText & AutoProcessor")
         return model, processor
     except Exception as e:
         logger.info(f"AutoModelForImageTextToText load failed: {e}. Trying legacy AutoModel...")
         model = AutoModel.from_pretrained(
-            model_id,
+            base_model_id,
             trust_remote_code=True,
             torch_dtype=dtype,
             device_map="auto",
         )
         tokenizer = AutoTokenizer.from_pretrained(
-            model_id,
+            model_id if not is_peft else base_model_id,
             trust_remote_code=True,
         )
+        if is_peft:
+            from peft import PeftModel
+            logger.info(f"Applying LoRA weights from {model_id}...")
+            model = PeftModel.from_pretrained(model, model_id)
+
         model.eval()
         logger.info("Model loaded with legacy AutoModel & AutoTokenizer")
         return model, tokenizer

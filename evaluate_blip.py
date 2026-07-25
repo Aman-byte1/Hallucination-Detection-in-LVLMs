@@ -185,16 +185,38 @@ def find_robust_span(span_text, response_text, used_positions):
     return None
 
 
+def normalize_blip_json(text: str) -> str:
+    """Normalize BLIP output token spacing around JSON keys, quotes, and numbers."""
+    # 1. Clean spaces inside standard JSON key names: " text " -> "text"
+    text = re.sub(r'"\s*(text|label|prob|confidence|start|end)\s*"', r'"\1"', text)
+    # 2. Clean spaces in numbers: 0. 33 -> 0.33
+    text = re.sub(r'(\d+)\s*\.\s*(\d+)', r'\1.\2', text)
+    # 3. Clean spaces around colons and quotes
+    text = re.sub(r'"\s*:\s*', '": ', text)
+    return text
+
+
 def resolve_labels(parsed_list, response_text):
     cleaned = []
     used_positions = set()
-    for item in parsed_list:
-        if not isinstance(item, dict):
+    for raw_item in parsed_list:
+        if not isinstance(raw_item, dict):
             continue
+
+        # Strip whitespace from keys and values
+        item = {}
+        for k, v in raw_item.items():
+            k_clean = str(k).strip()
+            if isinstance(v, str):
+                item[k_clean] = v.strip()
+            else:
+                item[k_clean] = v
+
         label = str(item.get("label", "invention"))
         prob = 0.5
         try:
-            prob = float(item.get("prob", item.get("confidence", 0.5)))
+            val_str = re.sub(r"\s+", "", str(item.get("prob", item.get("confidence", 0.5))))
+            prob = float(val_str)
         except (ValueError, TypeError):
             pass
         prob = max(0.0, min(1.0, prob))
@@ -240,6 +262,9 @@ def parse_model_output(output_text, response_text=""):
     text = re.sub(r"```json\s*", "", text)
     text = re.sub(r"```\s*", "", text)
     text = text.strip()
+
+    # Normalize BLIP tokenization spacing artifacts
+    text = normalize_blip_json(text)
 
     parsed = None
 
