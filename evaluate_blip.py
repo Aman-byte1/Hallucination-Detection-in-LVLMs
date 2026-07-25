@@ -200,17 +200,18 @@ def resolve_labels(parsed_list, response_text):
     cleaned = []
     used_positions = set()
     for raw_item in parsed_list:
-        if not isinstance(raw_item, dict):
+        if isinstance(raw_item, str):
+            item = {"text": raw_item.strip(), "label": "invention", "prob": 0.9}
+        elif isinstance(raw_item, dict):
+            item = {}
+            for k, v in raw_item.items():
+                k_clean = str(k).strip()
+                if isinstance(v, str):
+                    item[k_clean] = v.strip()
+                else:
+                    item[k_clean] = v
+        else:
             continue
-
-        # Strip whitespace from keys and values
-        item = {}
-        for k, v in raw_item.items():
-            k_clean = str(k).strip()
-            if isinstance(v, str):
-                item[k_clean] = v.strip()
-            else:
-                item[k_clean] = v
 
         label = str(item.get("label", "invention"))
         prob = 0.5

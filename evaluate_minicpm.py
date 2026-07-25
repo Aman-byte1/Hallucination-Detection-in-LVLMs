@@ -219,13 +219,25 @@ def find_robust_span(span_text, response_text, used_positions):
 def resolve_labels(parsed_list, response_text):
     cleaned = []
     used_positions = set()
-    for item in parsed_list:
-        if not isinstance(item, dict):
+    for raw_item in parsed_list:
+        if isinstance(raw_item, str):
+            item = {"text": raw_item.strip(), "label": "invention", "prob": 0.9}
+        elif isinstance(raw_item, dict):
+            item = {}
+            for k, v in raw_item.items():
+                k_clean = str(k).strip()
+                if isinstance(v, str):
+                    item[k_clean] = v.strip()
+                else:
+                    item[k_clean] = v
+        else:
             continue
+
         label = str(item.get("label", "invention"))
         prob = 0.5
         try:
-            prob = float(item.get("prob", item.get("confidence", 0.5)))
+            val_str = re.sub(r"\s+", "", str(item.get("prob", item.get("confidence", 0.9))))
+            prob = float(val_str)
         except (ValueError, TypeError):
             pass
         prob = max(0.0, min(1.0, prob))
