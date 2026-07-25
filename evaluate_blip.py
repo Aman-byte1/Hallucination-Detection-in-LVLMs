@@ -166,6 +166,8 @@ def find_robust_span(span_text, response_text, used_positions):
     words = clean_span.lower().split()
     if not words:
         return None
+
+    # 1. Try exact full phrase match
     pattern = r"\s+".join(re.escape(w) for w in words)
     search_start = 0
     while search_start < len(clean_resp):
@@ -174,14 +176,30 @@ def find_robust_span(span_text, response_text, used_positions):
             break
         start_clean = search_start + match.start()
         end_clean = search_start + match.end() - 1
-        if end_clean >= len(idx_map) or start_clean >= len(idx_map):
-            break
-        orig_start = idx_map[start_clean]
-        orig_end = idx_map[end_clean] + 1
-        pos_key = (orig_start, orig_end)
-        if pos_key not in used_positions:
-            return pos_key
+        if end_clean < len(idx_map) and start_clean < len(idx_map):
+            orig_start = idx_map[start_clean]
+            orig_end = idx_map[end_clean] + 1
+            pos_key = (orig_start, orig_end)
+            if pos_key not in used_positions:
+                return pos_key
         search_start = start_clean + 1
+
+    # 2. Fallback for long/generated sentences: match the key content words in response
+    for w in words:
+        if len(w) <= 2 or w in ("the", "is", "a", "an", "of", "and", "in", "it", "to", "has", "made"):
+            continue
+        sub_pattern = r"\b" + re.escape(w) + r"\b"
+        match = re.search(sub_pattern, clean_resp.lower())
+        if match:
+            start_clean = match.start()
+            end_clean = match.end() - 1
+            if end_clean < len(idx_map) and start_clean < len(idx_map):
+                orig_start = idx_map[start_clean]
+                orig_end = idx_map[end_clean] + 1
+                pos_key = (orig_start, orig_end)
+                if pos_key not in used_positions:
+                    return pos_key
+
     return None
 
 
@@ -351,7 +369,7 @@ def load_model(model_id: str):
     return model, processor
 
 
-def run_inference(model, processor, sample, max_new_tokens=128):
+def run_inference(model, processor, sample, max_new_tokens=256):
     """Run hallucination detection inference using BLIP-VQA."""
     image_name = sample.get("image_name", "")
     image = None
@@ -385,6 +403,7 @@ def run_inference(model, processor, sample, max_new_tokens=128):
             output_ids = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
+                repetition_penalty=1.15,
             )
 
         response = processor.decode(output_ids[0], skip_special_tokens=True)
