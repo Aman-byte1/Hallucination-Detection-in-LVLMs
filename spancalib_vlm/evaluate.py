@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 from scipy.stats import pearsonr
 from tabulate import tabulate
 from tqdm import tqdm
