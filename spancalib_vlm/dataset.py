@@ -187,3 +187,59 @@ class SpanCalibDataset(TorchDataset):
             "gold_labels": labels,
             "response_text": response_text,
         }
+
+
+class DataCollatorForSpanCalib:
+    """Collates and dynamically pads SpanCalib batch elements to equal sequence length."""
+
+    def __init__(self, pad_token_id: int = 1):
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, batch: list[dict]) -> dict:
+        max_len = max(len(x["input_ids"]) for x in batch)
+
+        batch_input_ids = []
+        batch_attention_mask = []
+        batch_resp_mask = []
+        batch_bin_labels = []
+        batch_prob_labels = []
+        batch_cat_labels = []
+
+        ids_list = []
+        gold_labels_list = []
+        resp_texts = []
+
+        for item in batch:
+            l = len(item["input_ids"])
+            pad_len = max_len - l
+
+            # Pad tensors
+            padded_ids = torch.cat([item["input_ids"], torch.full((pad_len,), self.pad_token_id, dtype=torch.long)])
+            padded_att = torch.cat([item["attention_mask"], torch.zeros(pad_len, dtype=torch.long)])
+            padded_resp = torch.cat([item["response_token_mask"], torch.zeros(pad_len, dtype=torch.bool)])
+            padded_bin = torch.cat([item["binary_labels"], torch.zeros(pad_len, dtype=torch.float32)])
+            padded_prob = torch.cat([item["prob_labels"], torch.zeros(pad_len, dtype=torch.float32)])
+            padded_cat = torch.cat([item["category_labels"], torch.zeros(pad_len, dtype=torch.long)])
+
+            batch_input_ids.append(padded_ids)
+            batch_attention_mask.append(padded_att)
+            batch_resp_mask.append(padded_resp)
+            batch_bin_labels.append(padded_bin)
+            batch_prob_labels.append(padded_prob)
+            batch_cat_labels.append(padded_cat)
+
+            ids_list.append(item["id"])
+            gold_labels_list.append(item.get("gold_labels", []))
+            resp_texts.append(item.get("response_text", ""))
+
+        return {
+            "id": ids_list,
+            "input_ids": torch.stack(batch_input_ids, dim=0),
+            "attention_mask": torch.stack(batch_attention_mask, dim=0),
+            "response_token_mask": torch.stack(batch_resp_mask, dim=0),
+            "binary_labels": torch.stack(batch_bin_labels, dim=0),
+            "prob_labels": torch.stack(batch_prob_labels, dim=0),
+            "category_labels": torch.stack(batch_cat_labels, dim=0),
+            "gold_labels": gold_labels_list,
+            "response_text": resp_texts,
+        }

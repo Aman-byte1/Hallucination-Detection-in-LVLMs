@@ -27,7 +27,7 @@ from tqdm import tqdm
 # Add parent directory to path to enable clean package imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from spancalib_vlm.dataset import SpanCalibDataset
+from spancalib_vlm.dataset import SpanCalibDataset, DataCollatorForSpanCalib
 from spancalib_vlm.model import SpanCalibVLM
 
 logging.basicConfig(
@@ -165,8 +165,11 @@ def main():
     train_dataset = SpanCalibDataset(train_samples, tokenizer, images_dir)
     val_dataset = SpanCalibDataset(val_samples, tokenizer, images_dir)
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 1
+    collator = DataCollatorForSpanCalib(pad_token_id=pad_id)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collator)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collator)
 
     # 3. Model & Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
