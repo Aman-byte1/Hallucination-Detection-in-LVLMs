@@ -331,13 +331,35 @@ def load_model(model_id: str):
     is_peft = False
     base_model_id = model_id
     try:
-        from peft import PeftConfig
-        peft_config = PeftConfig.from_pretrained(model_id)
-        base_model_id = getattr(peft_config, "base_model_name_or_path", "openbmb/MiniCPM-V-4.6")
+        from huggingface_hub import hf_hub_download
+        cfg_file = hf_hub_download(repo_id=model_id, filename="adapter_config.json")
+        with open(cfg_file, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        base_model_id = cfg.get("base_model_name_or_path", "openbmb/MiniCPM-V-4.6")
         is_peft = True
         logger.info(f"Detected PEFT LoRA adapter repo. Base model: {base_model_id}")
-    except Exception:
-        pass
+    except Exception as e:
+        # Check local folder for adapter_config.json
+        local_cfg = Path(model_id) / "adapter_config.json"
+        if local_cfg.exists():
+            try:
+                with open(local_cfg, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                base_model_id = cfg.get("base_model_name_or_path", "openbmb/MiniCPM-V-4.6")
+                is_peft = True
+                logger.info(f"Detected local PEFT LoRA adapter. Base model: {base_model_id}")
+            except Exception:
+                pass
+
+    # Ensure peft module is available if needed
+    if is_peft:
+        try:
+            from peft import PeftModel
+        except ImportError:
+            logger.info("Installing peft...")
+            import subprocess
+            subprocess.run([sys.executable, "-m", "pip", "install", "peft"], check=True)
+            from peft import PeftModel
 
     try:
         model = AutoModelForImageTextToText.from_pretrained(
