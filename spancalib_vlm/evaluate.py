@@ -1,0 +1,394 @@
+"""
+SpanCalib-VLM Evaluation Pipeline
+==================================
+Evaluates trained SpanCalib-VLM model on SHROOM-Visions test data,
+reconstructs character-level spans from predicted token probabilities,
+and outputs standardized metrics table.
+"""
+
+import argparse
+import csv
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+from scipy.stats import pearsonr
+from tabulate import tabulate
+from tqdm import tqdm
+from transformers import AutoTokenizer
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from spancalib_vlm.dataset import REVERSE_CATEGORY_MAP, find_image
+from spancalib_vlm.model import SpanCalibVLM
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Standardized Metrics (same as main evaluate.py)
+# ============================================================================
+
+def labels_to_char_binary(labels: list[dict], response_length: int) -> np.ndarray:
+    arr = np.zeros(response_length, dtype=np.float64)
+    for label in labels:
+        start = max(0, label["start"])
+        end = min(response_length, label["end"])
+        arr[start:end] = 1.0
+    return arr
+
+
+def labels_to_char_probs(labels: list[dict], response_length: int) -> np.ndarray:
+    arr = np.zeros(response_length, dtype=np.float64)
+    for label in labels:
+        start = max(0, label["start"])
+        end = min(response_length, label["end"])
+        prob = label.get("prob", 1.0)
+        arr[start:end] = np.maximum(arr[start:end], prob)
+    return arr
+
+
+def compute_iou(gold_labels: list[dict], pred_labels: list[dict], response_length: int) -> float:
+    gold_arr = labels_to_char_binary(gold_labels, response_length)
+    pred_arr = labels_to_char_binary(pred_labels, response_length)
+    intersection = np.sum(gold_arr * pred_arr)
+    union = np.sum(np.maximum(gold_arr, pred_arr))
+    return 1.0 if union == 0 else float(intersection / union)
+
+
+def compute_calibration(gold_labels: list[dict], pred_labels: list[dict], response_length: int) -> float | None:
+    gold_probs = labels_to_char_probs(gold_labels, response_length)
+    pred_probs = labels_to_char_probs(pred_labels, response_length)
+    if np.std(gold_probs) == 0 and np.std(pred_probs) == 0:
+        return 1.0
+    if np.std(gold_probs) == 0 or np.std(pred_probs) == 0:
+        return 0.0
+    corr, _ = pearsonr(gold_probs, pred_probs)
+    return float(corr) if not np.isnan(corr) else 0.0
+
+
+# ============================================================================
+# Token-to-Character Span Reconstruction
+# ============================================================================
+
+def reconstruct_spans_from_tokens(
+    token_probs: np.ndarray,
+    token_cats: np.ndarray,
+    offsets: list[tuple[int, int]],
+    response_text: str,
+    threshold: float = 0.50,
+) -> list[dict]:
+    """Reconstruct contiguous character spans from predicted token probabilities."""
+    resp_len = len(response_text)
+    if resp_len == 0:
+        return []
+
+    # Map token probabilities to character array
+    char_probs = np.zeros(resp_len, dtype=np.float32)
+    char_cats = np.zeros(resp_len, dtype=np.int64)
+
+    for i, (s, e) in enumerate(offsets):
+        if s >= e or s >= resp_len:
+            continue
+        e_clamped = min(resp_len, e)
+        if token_probs[i] >= threshold:
+            char_probs[s:e_clamped] = np.maximum(char_probs[s:e_clamped], token_probs[i])
+            char_cats[s:e_clamped] = token_cats[i]
+
+    # Find contiguous spans where char_probs >= threshold
+    spans = []
+    in_span = False
+    start_idx = 0
+
+    for i in range(resp_len):
+        if char_probs[i] >= threshold and not in_span:
+            in_span = True
+            start_idx = i
+        elif char_probs[i] < threshold and in_span:
+            in_span = False
+            end_idx = i
+            avg_prob = float(np.mean(char_probs[start_idx:end_idx]))
+            cat_idx = int(np.bincount(char_cats[start_idx:end_idx]).argmax())
+            cat_name = REVERSE_CATEGORY_MAP.get(cat_idx, "invention")
+            spans.append({
+                "start": start_idx,
+                "end": end_idx,
+                "label": cat_name,
+                "prob": round(avg_prob, 4),
+            })
+
+    if in_span:
+        end_idx = resp_len
+        avg_prob = float(np.mean(char_probs[start_idx:end_idx]))
+        cat_idx = int(np.bincount(char_cats[start_idx:end_idx]).argmax())
+        cat_name = REVERSE_CATEGORY_MAP.get(cat_idx, "invention")
+        spans.append({
+            "start": start_idx,
+            "end": end_idx,
+            "label": cat_name,
+            "prob": round(avg_prob, 4),
+        })
+
+    return spans
+
+
+# ============================================================================
+# Main Evaluation Loop
+# ============================================================================
+
+def load_data(filepath: Path) -> list[dict]:
+    samples = []
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                samples.append(json.loads(line))
+    return samples
+
+
+def split_eval_data(samples: list[dict], ratio: float = 0.10, seed: int = 42) -> list[dict]:
+    rng = np.random.RandomState(seed)
+    n_eval = max(1, int(len(samples) * ratio))
+    indices = rng.choice(len(samples), size=n_eval, replace=False)
+    return [samples[i] for i in sorted(indices)]
+
+
+def evaluate(args):
+    start_time = time.time()
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = output_dir / "predictions_en.csv"
+    json_path = output_dir / "metrics_en.json"
+    predictions_jsonl_path = output_dir / "predictions_en.jsonl"
+
+    logger.info("=" * 60)
+    logger.info("  SHROOM-Visions Evaluation: SpanCalib-VLM")
+    logger.info("=" * 60)
+
+    # 1. Load Data
+    all_samples = load_data(Path(args.data_file))
+    eval_samples = split_eval_data(all_samples, ratio=0.10, seed=42)
+
+    if args.max_samples and args.max_samples < len(eval_samples):
+        eval_samples = eval_samples[:args.max_samples]
+
+    logger.info(f"Evaluating {len(eval_samples)} samples...")
+
+    # 2. Load Model & Tokenizer
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
+
+    model = SpanCalibVLM(model_id=args.model_id)
+    checkpoint_file = Path(args.checkpoint_dir) / "best_model.pt"
+    if not checkpoint_file.exists():
+        checkpoint_file = Path(args.checkpoint_dir) / "final_model.pt"
+
+    if checkpoint_file.exists():
+        logger.info(f"Loading trained weights from {checkpoint_file}")
+        model.load_state_dict(torch.load(checkpoint_file, map_location=device))
+    else:
+        logger.warning(f"Checkpoint not found at {checkpoint_file}. Running with initialized weights.")
+
+    model.to(device)
+    model.eval()
+
+    # 3. Inference Loop
+    predictions = []
+    per_sample_metrics = []
+
+    for sample in tqdm(eval_samples, desc="Evaluating"):
+        prompt_text = sample["prompt"]
+        response_text = sample["response"]
+        gold_labels = sample.get("labels", [])
+        resp_len = len(response_text)
+
+        formatted_prompt = f"Question: {prompt_text}\nResponse: {response_text}"
+
+        encoded = tokenizer(
+            formatted_prompt,
+            truncation=True,
+            max_length=512,
+            return_offsets_mapping=True,
+            return_tensors="pt",
+        )
+
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+        offsets = encoded["offset_mapping"].squeeze(0).tolist()
+
+        resp_start = formatted_prompt.find(response_text)
+        if resp_start == -1:
+            resp_start = 0
+
+        adjusted_offsets = []
+        for s, e in offsets:
+            if s >= resp_start and e > resp_start:
+                adjusted_offsets.append((s - resp_start, e - resp_start))
+            else:
+                adjusted_offsets.append((0, 0))
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            pred_probs = outputs["pred_probs"].squeeze(0).cpu().numpy()
+            cat_logits = outputs["cat_logits"].squeeze(0).cpu().numpy()
+            token_cats = cat_logits.argmax(axis=-1)
+
+        # Reconstruct spans
+        pred_labels = reconstruct_spans_from_tokens(
+            token_probs=pred_probs,
+            token_cats=token_cats,
+            offsets=adjusted_offsets,
+            response_text=response_text,
+            threshold=args.threshold,
+        )
+
+        iou = compute_iou(gold_labels, pred_labels, resp_len)
+        cal = compute_calibration(gold_labels, pred_labels, resp_len)
+
+        has_gold = len(gold_labels) > 0
+        has_pred = len(pred_labels) > 0
+
+        per_sample_metrics.append({
+            "id": sample["id"],
+            "iou": iou,
+            "calibration": cal,
+            "gold_span_count": len(gold_labels),
+            "pred_span_count": len(pred_labels),
+            "has_gold_hallucination": has_gold,
+            "has_pred_hallucination": has_pred,
+            "response_length": resp_len,
+        })
+
+        predictions.append({
+            "id": sample["id"],
+            "prompt": prompt_text,
+            "image_name": sample.get("image_name", ""),
+            "response": response_text,
+            "gold_labels": gold_labels,
+            "pred_labels": pred_labels,
+        })
+
+    # 4. Aggregate Metrics
+    iou_scores = [m["iou"] for m in per_sample_metrics]
+    cal_scores = [m["calibration"] for m in per_sample_metrics if m["calibration"] is not None]
+    halluc_iou = [m["iou"] for m in per_sample_metrics if m["has_gold_hallucination"]]
+    clean_iou = [m["iou"] for m in per_sample_metrics if not m["has_gold_hallucination"]]
+
+    n_total = len(per_sample_metrics)
+    n_gold_halluc = sum(1 for m in per_sample_metrics if m["has_gold_hallucination"])
+    n_clean = n_total - n_gold_halluc
+    n_correct_clean = sum(1 for m in per_sample_metrics if not m["has_gold_hallucination"] and not m["has_pred_hallucination"])
+    n_correct_halluc = sum(1 for m in per_sample_metrics if m["has_gold_hallucination"] and m["has_pred_hallucination"])
+
+    overall_results = {
+        "model": args.model_id,
+        "eval_samples": n_total,
+        "metrics": {
+            "overall": {
+                "iou_mean": float(np.mean(iou_scores)) if iou_scores else 0.0,
+                "calibration_mean": float(np.mean(cal_scores)) if cal_scores else 0.0,
+            },
+            "hallucinated_samples": {
+                "count": n_gold_halluc,
+                "iou_mean": float(np.mean(halluc_iou)) if halluc_iou else 0.0,
+            },
+            "clean_samples": {
+                "count": n_clean,
+                "iou_mean": float(np.mean(clean_iou)) if clean_iou else 0.0,
+            },
+            "detection_stats": {
+                "correct_clean": n_correct_clean,
+                "total_clean": n_clean,
+                "correct_halluc": n_correct_halluc,
+                "total_halluc": n_gold_halluc,
+                "detection_accuracy": (n_correct_clean + n_correct_halluc) / n_total if n_total > 0 else 0.0,
+            },
+        },
+        "timing": {
+            "total_seconds": round(time.time() - start_time, 2),
+        },
+    }
+
+    # 5. Save Outputs
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "id", "prompt", "image_name", "response_length",
+            "gold_span_count", "pred_span_count",
+            "gold_labels_json", "pred_labels_json", "iou", "calibration",
+        ])
+        for pred, m in zip(predictions, per_sample_metrics):
+            writer.writerow([
+                pred["id"], pred["prompt"], pred["image_name"],
+                len(pred["response"]), m["gold_span_count"], m["pred_span_count"],
+                json.dumps(pred["gold_labels"], ensure_ascii=False),
+                json.dumps(pred["pred_labels"], ensure_ascii=False),
+                f"{m['iou']:.6f}",
+                f"{m['calibration']:.6f}" if m["calibration"] is not None else "",
+            ])
+
+    with open(predictions_jsonl_path, "w", encoding="utf-8") as f:
+        for pred in predictions:
+            f.write(json.dumps(pred, ensure_ascii=False) + "\n")
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(overall_results, f, indent=2, ensure_ascii=False)
+
+    # 6. Print Standardized Table
+    det_stats = overall_results["metrics"]["detection_stats"]
+    overall_iou = overall_results["metrics"]["overall"]["iou_mean"]
+    halluc_iou_val = overall_results["metrics"]["hallucinated_samples"]["iou_mean"]
+    clean_iou_val = overall_results["metrics"]["clean_samples"]["iou_mean"]
+    det_acc = det_stats["detection_accuracy"]
+
+    print("\n" + "=" * 70)
+    print("  SHROOM-Visions Evaluation Summary — SpanCalib-VLM")
+    print(f"  Model: {args.model_id}")
+    print(f"  Eval Samples: {n_total} (Hallucinated: {n_gold_halluc}, Clean: {n_clean})")
+    print(f"  Time: {overall_results['timing']['total_seconds']:.1f}s")
+    print("=" * 70)
+
+    summary_table = [
+        ["Overall IoU", f"{overall_iou:.3f}"],
+        ["Hallucinated IoU", f"{halluc_iou_val:.3f}"],
+        ["Clean IoU", f"{clean_iou_val:.3f}"],
+        ["Detection Accuracy", f"{det_acc:.3f}"],
+        ["Clean correct",
+         f"{n_correct_clean}/{n_clean} ({100*n_correct_clean/n_clean:.1f}%)" if n_clean > 0 else "0/0"],
+        ["Halluc correct",
+         f"{n_correct_halluc}/{n_gold_halluc} ({100*n_correct_halluc/n_gold_halluc:.1f}%)" if n_gold_halluc > 0 else "0/0"],
+    ]
+    print("\n📊 Key Metrics:")
+    print(tabulate(summary_table, headers=["Metric", "Value"], tablefmt="rounded_outline"))
+    print(f"\n📁 Results saved to: {output_dir}")
+    print("=" * 70)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate SpanCalib-VLM Model")
+    parser.add_argument(
+        "--data_file",
+        default="shroom-visions-data/distrib/shroom-vision.train.en.labeled.jsonl",
+    )
+    parser.add_argument("--model_id", default="xlm-roberta-base")
+    parser.add_argument("--checkpoint_dir", default="./checkpoints/spancalib_vlm")
+    parser.add_argument("--output_dir", default="./outputs_spancalib_vlm")
+    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--max_samples", type=int, default=None)
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    evaluate(parse_args())
