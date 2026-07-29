@@ -82,14 +82,17 @@ echo "  Working directory: $(pwd)"
 echo ""
 echo "[2/8] Setting up Python environment..."
 
-if [ ! -d "venv_finetune" ]; then
-    python3 -m venv venv_finetune
-    echo "  Created venv_finetune/"
+# Store venv OUTSIDE the repo so 'rm -rf' of the repo doesn't nuke it
+VENV_DIR="/workspace/venv_shroom_sft"
+
+if [ ! -d "$VENV_DIR" ]; then
+    python3 -m venv "$VENV_DIR"
+    echo "  Created $VENV_DIR/"
 else
-    echo "  venv_finetune/ already exists, reusing."
+    echo "  $VENV_DIR/ already exists, reusing (no reinstall needed)."
 fi
-source venv_finetune/bin/activate
-echo "  Activated venv_finetune (Python: $(python --version))"
+source "$VENV_DIR/bin/activate"
+echo "  Activated venv (Python: $(python --version))"
 
 pip install --upgrade pip --quiet
 
