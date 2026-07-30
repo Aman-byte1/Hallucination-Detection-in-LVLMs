@@ -664,20 +664,23 @@ def evaluate(args):
     """Run the full evaluation pipeline."""
     start_time = time.time()
 
-    # ── Setup output directory ──
-    out_dir = Path(args.output_dir) if getattr(args, "output_dir", None) else OUTPUT_DIR
+    lang = getattr(args, "lang", "en")
+    data_file = Path(args.data_file) if getattr(args, "data_file", None) else DATA_DIR / f"shroom-vision.train.{lang}.labeled.jsonl"
+
+    out_dir = Path(args.output_dir) if getattr(args, "output_dir", None) else OUTPUT_DIR / f"qwen_{lang}"
     out_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = out_dir / "checkpoint.json"
-    csv_path = out_dir / "predictions_en.csv"
-    json_path = out_dir / "metrics_en.json"
-    predictions_jsonl_path = out_dir / "predictions_en.jsonl"
+    csv_path = out_dir / f"predictions_{lang}.csv"
+    json_path = out_dir / f"metrics_{lang}.json"
+    predictions_jsonl_path = out_dir / f"predictions_{lang}.jsonl"
 
     # ── Load and split data ──
     logger.info("=" * 60)
-    logger.info("SHROOM-Visions Evaluation Pipeline")
+    logger.info(f"SHROOM-Visions Evaluation Pipeline [{lang.upper()}]")
+    logger.info(f"Data file: {data_file}")
     logger.info("=" * 60)
 
-    all_samples = load_data(TRAIN_FILE)
+    all_samples = load_data(data_file)
     eval_samples = split_eval_data(all_samples, ratio=EVAL_SPLIT_RATIO, seed=RANDOM_SEED)
 
     # ── Check images presence ──
@@ -1003,8 +1006,16 @@ Examples:
         """,
     )
     parser.add_argument(
-        "--model_id", type=str, default=DEFAULT_MODEL_ID,
-        help=f"HuggingFace model ID (default: {DEFAULT_MODEL_ID})",
+        "--model_id", type=str, default="Qwen/Qwen3.5-4B",
+        help="HuggingFace model ID (default: Qwen/Qwen3.5-4B)",
+    )
+    parser.add_argument(
+        "--data_file", type=str, default=None,
+        help="Path to labeled data file (default: shroom-vision.train.en.labeled.jsonl)",
+    )
+    parser.add_argument(
+        "--lang", type=str, default="en",
+        help="Language code: en, fr, it, zh (default: en)",
     )
     parser.add_argument(
         "--max_samples", type=int, default=None,
