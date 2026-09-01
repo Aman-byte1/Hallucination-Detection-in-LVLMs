@@ -34,18 +34,32 @@ models/
 .cache/
 huggingface_cache/
 
-# Data files (large - downloaded via setup.sh)
+# Data files & Submissions (regeneratable / large)
 shroom-visions-data/
 shroom-visions-images/
 shroom-vis-images/
 shroom-visions-data.zip
 shroom-visions-images.tar.gz
+participant_kit/
+submission/
+submission.tar.gz
 *.zip
 *.tar.gz
 inspect_sample.py
 
 # Outputs (regeneratable)
 outputs/
+
+# LaTeX build artifacts (paper source files remain tracked)
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
 
 # OS
 .DS_Store

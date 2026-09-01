@@ -23,9 +23,11 @@ CATEGORY_MAP = {
     "mischaracterization": 2,
     "OCR": 3,
     "miscounting": 4,
+    "other": 5,
 }
 
-REVERSE_CATEGORY_MAP = {v: k for k, v in CATEGORY_MAP.items()}
+# Reverse map excludes "none" — only valid competition labels
+REVERSE_CATEGORY_MAP = {v: k for k, v in CATEGORY_MAP.items() if k != "none"}
 
 
 def find_image(image_name: str, images_dir: Path) -> Path | None:

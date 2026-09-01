@@ -119,12 +119,19 @@ def main():
     except Exception as e:
         print(f"Unsloth load fallback: {e}")
         from transformers import AutoProcessor, AutoModelForCausalLM
-        model = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL_ID,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if torch.cuda.is_available() else None,
-            trust_remote_code=True,
-        )
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                BASE_MODEL_ID,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto" if torch.cuda.is_available() else None,
+                trust_remote_code=True,
+            )
+        except Exception:
+            model = AutoModelForCausalLM.from_pretrained(
+                BASE_MODEL_ID,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                trust_remote_code=True,
+            ).to(device)
         processor = AutoProcessor.from_pretrained(BASE_MODEL_ID, trust_remote_code=True)
         model.eval()
 
