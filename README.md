@@ -134,13 +134,5 @@ python generate_submission.py
 
 ## 📜 Citation & Paper
 
-If you use this codebase or reference our work, please cite the paper included in `paper/shroom_spancalib_vlm.pdf`:
-
-```bibtex
-@inproceedings{gizachew2026shroom,
-  title={Span Calibration for Hallucination Detection in Vision-Language Models},
-  author={Gizachew, Amanuel},
-  booktitle={Proceedings of the SHROOM-Visions Shared Task at SemEval 2026},
-  year={2026}
-}
+If you use this codebase or reference our work, please cite the paper included in https://arxiv.org/abs/2608.29974:
 ```
